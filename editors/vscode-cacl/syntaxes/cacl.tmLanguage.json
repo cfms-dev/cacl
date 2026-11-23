@@ -1,0 +1,103 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "CACL",
+  "scopeName": "source.cacl",
+  "fileTypes": ["cacl"],
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#directive" },
+    { "include": "#effect" },
+    { "include": "#op-set" },
+    { "include": "#scope-clause" },
+    { "include": "#time-clause" },
+    { "include": "#remark-clause" },
+    { "include": "#predicate" },
+    { "include": "#logic-keywords" },
+    { "include": "#string" }
+  ],
+  "repository": {
+    "comment": {
+      "name": "comment.line.number-sign.cacl",
+      "match": "#[^\\r\\n]*"
+    },
+    "directive": {
+      "match": "\\b(inherit)\\s+(on|off)\\b",
+      "captures": {
+        "1": { "name": "keyword.control.directive.cacl" },
+        "2": { "name": "constant.language.boolean.cacl" }
+      }
+    },
+    "effect": {
+      "patterns": [
+        { "name": "keyword.control.effect.allow.cacl", "match": "\\ballow\\b" },
+        { "name": "keyword.control.effect.deny.cacl", "match": "\\bdeny\\b" }
+      ]
+    },
+    "op-set": {
+      "begin": "\\[",
+      "end": "\\]",
+      "beginCaptures": { "0": { "name": "punctuation.section.brackets.begin.cacl" } },
+      "endCaptures": { "0": { "name": "punctuation.section.brackets.end.cacl" } },
+      "patterns": [
+        { "include": "#comment" },
+        {
+          "match": "(-)\\s*([A-Z][A-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.operator.arithmetic.minus.cacl" },
+            "2": { "name": "variable.other.constant.subtracted.cacl" }
+          }
+        },
+        {
+          "name": "constant.other.macro.cacl",
+          "match": "\\b(CREATE_CHILD|MOVE|PRESET_(?:READ|WRITE|RW|TRASH_MANAGE|ACL_MANAGE))\\b"
+        },
+        {
+          "name": "entity.name.type.operation.cacl",
+          "match": "\\b[A-Z][A-Z0-9_]*\\b"
+        }
+      ]
+    },
+    "scope-clause": {
+      "match": "\\b(on)\\s+(self|dirs|docs|all)\\b",
+      "captures": {
+        "1": { "name": "keyword.other.scope.cacl" },
+        "2": { "name": "support.constant.scope-target.cacl" }
+      }
+    },
+    "time-clause": {
+      "match": "\\b(from|until)\\s+(\"([^\"\\\\\\r\\n]|\\\\.)*\")",
+      "captures": {
+        "1": { "name": "keyword.other.temporal.cacl" },
+        "2": { "name": "constant.other.timestamp.rfc3339.cacl" }
+      }
+    },
+    "remark-clause": {
+      "match": "\\b(remark)\\s+(\"([^\"\\\\\\r\\n]|\\\\.)*\")",
+      "captures": {
+        "1": { "name": "keyword.other.remark.cacl" },
+        "2": { "name": "string.quoted.double.remark.cacl" }
+      }
+    },
+    "predicate": {
+      "match": "\\b(user|group|role|perm)(?=\\s*\\()",
+      "captures": {
+        "1": { "name": "support.function.predicate.cacl" }
+      }
+    },
+    "logic-keywords": {
+      "patterns": [
+        { "name": "keyword.control.clause.cacl", "match": "\\b(to|when)\\b" },
+        { "name": "keyword.operator.logical.cacl", "match": "\\b(and|or|not)\\b" },
+        { "name": "constant.language.any.cacl", "match": "\\bany\\b" }
+      ]
+    },
+    "string": {
+      "name": "string.quoted.double.cacl",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        { "name": "constant.character.escape.cacl", "match": "\\\\." }
+      ]
+    }
+  }
+}

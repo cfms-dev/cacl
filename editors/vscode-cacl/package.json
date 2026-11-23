@@ -1,0 +1,25 @@
+{
+  "name": "vscode-cacl",
+  "displayName": "CFMS Access Control Language (CACL)",
+  "description": "",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.146.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [{
+      "id": "cacl",
+      "aliases": ["CACL", "cacl"],
+      "extensions": [".cacl"],
+      "configuration": "./language-configuration.json"
+    }],
+    "grammars": [{
+      "language": "cacl",
+      "scopeName": "source.cacl",
+      "path": "./syntaxes/cacl.tmLanguage.json"
+    }]
+  }
+}
