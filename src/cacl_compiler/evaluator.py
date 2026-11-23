@@ -1,4 +1,4 @@
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
@@ -16,7 +16,12 @@ from .permissions import (
 
 @dataclass(frozen=True, slots=True)
 class Subject:
-    """Authenticated security principal; authorization ALWAYS binds to immutable user_id (UUID)."""
+    """Authenticated security principal (CEP-0002 Section 1).
+
+    ``user_id`` is the subject's unique user identifier, which is always a UUID;
+    ``user("id")`` predicates are compiled to canonical lowercase UUID strings and
+    matched against it.
+    """
 
     user_id: UUID
     username: str | None = None
@@ -80,7 +85,7 @@ def rule_active_at(rule: CompiledRule, eval_time_utc: datetime) -> bool:
 
 def _eval_atom(atom: ConditionAtom, subject: Subject) -> bool:
     if atom.kind is PredicateKind.USER:
-        matched = atom.value.lower() == str(subject.user_id).lower()
+        matched = atom.value == str(subject.user_id)
     elif atom.kind is PredicateKind.GROUP:
         matched = atom.value in subject.groups
     elif atom.kind is PredicateKind.PERM:
@@ -105,7 +110,7 @@ def _evaluate_dacl_on_chain(
     op: AtomicOp,
     eval_time_utc: datetime,
 ) -> tuple[bool, list[MatchedRuleTrace], list[MatchedRuleTrace], int, int]:
-    """Steps 4 & 5: Assemble inherited DACLs (respecting `inherit off`) and apply deny-overrides."""
+    """Steps 3 & 4: Assemble inherited DACLs (respecting `inherit off`) and apply deny-overrides."""
     target = chain_root_to_target[-1]
     effective_nodes: list[tuple[int, NamespaceNode]] = []
     # Walk upward from target (distance 0) to root, stopping when a node sets inherit=False
@@ -165,7 +170,7 @@ def _evaluate_dacl_on_chain(
 
 
 def evaluate_access(
-    subject: Subject,
+    subject: Subject | None,
     path_root_to_target: list[NamespaceNode],
     operation: AtomicOp,
     eval_time_utc: datetime | None = None,
@@ -176,6 +181,16 @@ def evaluate_access(
     if not path_root_to_target:
         raise ValueError("path_root_to_target must contain at least the target node.")
 
+    # Anonymous / unauthenticated requests are outside the DACL principal model:
+    # they never match any principal (including `any`), so nothing can be granted.
+    if subject is None:
+        return EvalDecision(
+            allowed=False,
+            reason="Unauthenticated request: not a DACL principal.",
+            step="0_unauthenticated",
+        )
+
+    # A single authoritative UTC snapshot `t` is used for the entire request.
     now = (eval_time_utc or datetime.now(UTC)).astimezone(UTC)
     target = path_root_to_target[-1]
 
@@ -192,12 +207,28 @@ def evaluate_access(
             reason=f"Operation {operation.name} is not applicable in state {target.state.value}.",
             step="1_lifecycle_and_type",
         )
+    # Restoring a directory requires its parent directory to be in the Normal state.
+    if (
+        operation is AtomicOp.RESTORE
+        and target.object_type is ObjectType.DIRECTORY
+        and len(path_root_to_target) > 1
+        and path_root_to_target[-2].state is not ObjectState.NORMAL
+    ):
+        return EvalDecision(
+            allowed=False,
+            reason="Cannot restore a directory whose parent directory is not in the normal state.",
+            step="1_lifecycle_and_type",
+        )
 
     # Step 2: Ancestor directory TRAVERSE checks
     if check_ancestor_traverse and len(path_root_to_target) > 1:
         for idx in range(len(path_root_to_target) - 1):
             ancestor = path_root_to_target[idx]
             if ancestor.state is not ObjectState.NORMAL:
+                if target.state is ObjectState.SOFT_DELETED:
+                    # Trash endpoints: soft-deleted ancestors of a co-deleted subtree are
+                    # skipped for TRAVERSE validation (avoids conflicting with Step 1).
+                    continue
                 return EvalDecision(
                     allowed=False,
                     reason=f"Ancestor '{ancestor.name}' ({ancestor.node_id}) is not in normal state.",
@@ -217,17 +248,17 @@ def evaluate_access(
                     effective_deny_mask=d_mask,
                 )
 
-    # Step 3: Mandatory system redlines
+    # Extension (not in CEP-0002): optional deployment-specific mandatory redlines.
     for hook in redlines or []:
         block_reason = hook(subject, target, operation)
         if block_reason is not None:
             return EvalDecision(
                 allowed=False,
                 reason=f"Blocked by mandatory redline: {block_reason}",
-                step="3_mandatory_redline",
+                step="ext_mandatory_redline",
             )
 
-    # Steps 4 & 5: DACL assembly + Deny-Overrides + Default-Deny
+    # Steps 3 & 4: DACL assembly + temporal filtering, Deny-Overrides + Default-Deny
     _allowed, denies, allows, a_mask, d_mask = _evaluate_dacl_on_chain(
         subject, path_root_to_target, operation, now
     )
@@ -235,7 +266,7 @@ def evaluate_access(
         return EvalDecision(
             allowed=False,
             reason=f"Explicitly denied by {len(denies)} matching deny rule(s).",
-            step="5_deny_overrides",
+            step="4_deny_overrides",
             matched_denies=tuple(denies),
             matched_allows=tuple(allows),
             effective_allow_mask=a_mask,
@@ -245,7 +276,7 @@ def evaluate_access(
         return EvalDecision(
             allowed=True,
             reason=f"Allowed by {len(allows)} matching allow rule(s) with no overriding deny.",
-            step="5_allow_matched",
+            step="4_allow_matched",
             matched_allows=tuple(allows),
             effective_allow_mask=a_mask,
             effective_deny_mask=d_mask,
@@ -253,7 +284,7 @@ def evaluate_access(
     return EvalDecision(
         allowed=False,
         reason="Default-deny: no matching allow rule granted the requested operation.",
-        step="5_default_deny",
+        step="4_default_deny",
         effective_allow_mask=a_mask,
         effective_deny_mask=d_mask,
     )
@@ -265,19 +296,29 @@ def evaluate_reparent(
     dest_parent_path: list[NamespaceNode],
     eval_time_utc: datetime | None = None,
     redlines: list[RedlineHook] | None = None,
+    also_rename: bool = False,
 ) -> EvalDecision:
-    """Step 6 example: cross-object composite authorization for reparenting an object."""
-    src_decision = evaluate_access(
-        subject, source_path, AtomicOp.REPARENT, eval_time_utc, redlines
-    )
-    if not src_decision.allowed:
-        return EvalDecision(
-            allowed=False,
-            reason=f"Source check failed: {src_decision.reason}",
-            step="6_composite_source",
-            matched_denies=src_decision.matched_denies,
-            matched_allows=src_decision.matched_allows,
+    """Step 5: composite authorization for reparenting (optionally with a rename).
+
+    Requires REPARENT on the source and CREATE_DOCUMENT / CREATE_DIRECTORY on the
+    destination parent. If the same operation also changes the name (``also_rename``),
+    RENAME on the source is required as well.
+    """
+    required_source_ops = [AtomicOp.REPARENT]
+    if also_rename:
+        required_source_ops.append(AtomicOp.RENAME)
+    for src_op in required_source_ops:
+        src_decision = evaluate_access(
+            subject, source_path, src_op, eval_time_utc, redlines
         )
+        if not src_decision.allowed:
+            return EvalDecision(
+                allowed=False,
+                reason=f"Source check ({src_op.name}) failed: {src_decision.reason}",
+                step="5_composite_source",
+                matched_denies=src_decision.matched_denies,
+                matched_allows=src_decision.matched_allows,
+            )
 
     src_node = source_path[-1]
     dest_op = (
@@ -292,14 +333,73 @@ def evaluate_reparent(
         return EvalDecision(
             allowed=False,
             reason=f"Destination check ({dest_op.name}) failed: {dst_decision.reason}",
-            step="6_composite_destination",
+            step="5_composite_destination",
             matched_denies=dst_decision.matched_denies,
             matched_allows=dst_decision.matched_allows,
         )
     return EvalDecision(
         allowed=True,
         reason=f"Composite reparent authorized (REPARENT on source + {dest_op.name} on destination).",
-        step="6_composite_allowed",
+        step="5_composite_allowed",
+    )
+
+
+def evaluate_soft_delete(
+    subject: Subject,
+    target_path: list[NamespaceNode],
+    descendant_paths: Sequence[list[NamespaceNode]] = (),
+    eval_time_utc: datetime | None = None,
+    redlines: list[RedlineHook] | None = None,
+) -> EvalDecision:
+    """Step 5: soft-deleting an object, including non-empty directories.
+
+    DELETE on the target itself is always required. If the target directory contains
+    non-deleted descendants (``descendant_paths``: each a full root-to-descendant path),
+    the subject must additionally hold DIRECTORY_DELETE_CHILD on the target directory
+    or DELETE on every affected descendant.
+    """
+    own = evaluate_access(subject, target_path, AtomicOp.DELETE, eval_time_utc, redlines)
+    if not own.allowed:
+        return EvalDecision(
+            allowed=False,
+            reason=f"DELETE on target failed: {own.reason}",
+            step="5_composite_delete_target",
+            matched_denies=own.matched_denies,
+            matched_allows=own.matched_allows,
+        )
+    if not descendant_paths:
+        return EvalDecision(
+            allowed=True,
+            reason="DELETE granted on target (no non-deleted descendants).",
+            step="5_composite_allowed",
+        )
+
+    bypass = evaluate_access(
+        subject, target_path, AtomicOp.DIRECTORY_DELETE_CHILD, eval_time_utc, redlines
+    )
+    if bypass.allowed:
+        return EvalDecision(
+            allowed=True,
+            reason="DELETE on target plus DIRECTORY_DELETE_CHILD (per-descendant checks bypassed).",
+            step="5_composite_allowed",
+        )
+    for path in descendant_paths:
+        child = evaluate_access(subject, path, AtomicOp.DELETE, eval_time_utc, redlines)
+        if not child.allowed:
+            return EvalDecision(
+                allowed=False,
+                reason=(
+                    "Missing DIRECTORY_DELETE_CHILD on target and DELETE denied on descendant "
+                    f"'{path[-1].name}' ({path[-1].node_id}): {child.reason}"
+                ),
+                step="5_composite_delete_descendant",
+                matched_denies=child.matched_denies,
+                matched_allows=child.matched_allows,
+            )
+    return EvalDecision(
+        allowed=True,
+        reason="DELETE granted on target and on every affected descendant.",
+        step="5_composite_allowed",
     )
 
 

@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+
 from lark import Lark, Token, Transformer, UnexpectedInput, v_args
 
 from .ast_nodes import (
@@ -89,6 +91,12 @@ def unescape_cacl_string(tok: Token, diagnostics: list[Diagnostic]) -> str:
     return "".join(out)
 
 
+@dataclass(frozen=True, slots=True)
+class _ToList:
+    items: tuple[ExprNode, ...]
+    span: Span
+
+
 class _ASTBuilder(Transformer):
     def __init__(self, diagnostics: list[Diagnostic]) -> None:
         super().__init__()
@@ -104,61 +112,83 @@ class _ASTBuilder(Transformer):
                 rules.append(stmt)
         return PolicyAST(directives=tuple(directives), rules=tuple(rules))
 
-    @v_args(meta=True)
-    def inherit_stmt(self, meta, children):
-        mode_tok: Token = children[1]
-        return InheritDirectiveNode(
-            enabled=(mode_tok.value == "on"), span=_meta_span(meta)
-        )
+    # NOTE: handlers mirror the normative grammar in cacl.lark (CEP-0002).
+    # Anonymous keyword/punctuation tokens are filtered out by Lark, and `?rule`
+    # productions with a single child are inlined, so children are positional
+    # values of the *named* sub-rules only.
 
     @v_args(meta=True)
-    def op_item(self, meta, children):
-        if len(children) == 2:
-            sign_tok, ident_tok = children
-            subtract = sign_tok.value == "-"
-        else:
-            ident_tok = children[0]
-            subtract = False
-        return OpItemNode(
-            name=ident_tok.value, subtract=subtract, span=_meta_span(meta)
-        )
+    def directive(self, meta, children):
+        return InheritDirectiveNode(enabled=children[0], span=_meta_span(meta))
+
+    def inherit_on(self, children):
+        return True
+
+    def inherit_off(self, children):
+        return False
+
+    def effect_allow(self, children):
+        return Effect.ALLOW
+
+    def effect_deny(self, children):
+        return Effect.DENY
+
+    @v_args(meta=True)
+    def op_add(self, meta, children):
+        return OpItemNode(name=children[0].value, subtract=False, span=_meta_span(meta))
+
+    @v_args(meta=True)
+    def op_sub(self, meta, children):
+        return OpItemNode(name=children[0].value, subtract=True, span=_meta_span(meta))
 
     @v_args(meta=True)
     def op_set(self, meta, children):
         return (tuple(children), _meta_span(meta))
 
+    def scope_self(self, children):
+        return Scope.SELF
+
+    def scope_dirs(self, children):
+        return Scope.DIRS
+
+    def scope_docs(self, children):
+        return Scope.DOCS
+
+    def scope_all(self, children):
+        return Scope.ALL
+
     @v_args(meta=True)
-    def scope_clause(self, meta, children):
-        scope_tok: Token = children[1]
-        return ("scope", Scope(scope_tok.value), _meta_span(meta))
-
-    def principal_kind(self, children):
-        return PredicateKind(children[0].value)
-
-    def pred_kind(self, children):
-        return PredicateKind(children[0].value)
+    def principal_pred(self, meta, children):
+        kind_tok, str_tok = children
+        return PredicateExprNode(
+            kind=PredicateKind(kind_tok.value),
+            raw_value=unescape_cacl_string(str_tok, self._diagnostics),
+            span=_meta_span(meta),
+        )
 
     @v_args(meta=True)
-    def pred_any(self, meta, children):
+    def perm_pred(self, meta, children):
+        kind_tok, str_tok = children
+        return PredicateExprNode(
+            kind=PredicateKind.PERM,
+            raw_value=unescape_cacl_string(str_tok, self._diagnostics),
+            span=_meta_span(meta),
+        )
+
+    @v_args(meta=True)
+    def any_pred(self, meta, children):
         return AnyExprNode(span=_meta_span(meta))
 
     @v_args(meta=True)
-    def pred_atom(self, meta, children):
-        kind: PredicateKind = children[0]
-        str_tok: Token = children[1]
-        val = unescape_cacl_string(str_tok, self._diagnostics)
-        return PredicateExprNode(kind=kind, raw_value=val, span=_meta_span(meta))
+    def principal_list(self, meta, children):
+        return _ToList(items=tuple(children), span=_meta_span(meta))
 
-    def principal_list(self, children):
-        return tuple(children)
-
-    @v_args(meta=True)
-    def to_clause(self, meta, children):
-        items: tuple[ExprNode, ...] = children[1]
-        expr: ExprNode = items[0]
+    @staticmethod
+    def _fold(op: str, items):
+        expr = items[0]
         for nxt in items[1:]:
             expr = BinaryExprNode(
-                op="or",
+                op=op,
                 left=expr,
                 right=nxt,
                 span=Span(
@@ -168,47 +198,35 @@ class _ASTBuilder(Transformer):
                     nxt.span.end_column,
                 ),
             )
-        return MatchClauseNode(
-            syntax="to", expr=expr, to_items=items, span=_meta_span(meta)
-        )
+        return expr
+
+    # Only produced when there are >= 2 operands (single child is inlined).
+    def or_expr(self, children):
+        return self._fold("or", children)
+
+    def and_expr(self, children):
+        return self._fold("and", children)
 
     @v_args(meta=True)
-    def when_clause(self, meta, children):
-        return MatchClauseNode(syntax="when", expr=children[1], span=_meta_span(meta))
+    def neg_expr(self, meta, children):
+        return NotExprNode(operand=children[0], span=_meta_span(meta))
+
+    def valid_from(self, children):
+        tok: Token = children[0]
+        return ("from", unescape_cacl_string(tok, self._diagnostics), _token_span(tok))
+
+    def valid_until(self, children):
+        tok: Token = children[0]
+        return ("until", unescape_cacl_string(tok, self._diagnostics), _token_span(tok))
 
     @v_args(meta=True)
-    def bool_or(self, meta, children):
-        return BinaryExprNode(
-            op="or", left=children[0], right=children[2], span=_meta_span(meta)
-        )
-
-    @v_args(meta=True)
-    def bool_and(self, meta, children):
-        return BinaryExprNode(
-            op="and", left=children[0], right=children[2], span=_meta_span(meta)
-        )
-
-    @v_args(meta=True)
-    def bool_not(self, meta, children):
-        return NotExprNode(operand=children[1], span=_meta_span(meta))
-
-    @v_args(meta=True)
-    def from_clause(self, meta, children):
-        tok: Token = children[1]
-        return (unescape_cacl_string(tok, self._diagnostics), _token_span(tok))
-
-    @v_args(meta=True)
-    def until_clause(self, meta, children):
-        tok: Token = children[1]
-        return (unescape_cacl_string(tok, self._diagnostics), _token_span(tok))
-
-    @v_args(meta=True)
-    def time_from_opt_until(self, meta, children):
-        v_from, f_span = children[0]
-        if len(children) == 2:
-            v_until, u_span = children[1]
-        else:
-            v_until, u_span = None, None
+    def time_window(self, meta, children):
+        v_from = f_span = v_until = u_span = None
+        for kind, value, span in children:
+            if kind == "from":
+                v_from, f_span = value, span
+            else:
+                v_until, u_span = value, span
         return TimeWindowNode(
             valid_from=v_from,
             from_span=f_span,
@@ -218,47 +236,42 @@ class _ASTBuilder(Transformer):
         )
 
     @v_args(meta=True)
-    def time_only_until(self, meta, children):
-        v_until, u_span = children[0]
-        return TimeWindowNode(
-            valid_from=None,
-            from_span=None,
-            valid_until=v_until,
-            until_span=u_span,
-            span=_meta_span(meta),
-        )
-
-    @v_args(meta=True)
     def remark_clause(self, meta, children):
-        tok: Token = children[1]
         return (
             "remark",
-            unescape_cacl_string(tok, self._diagnostics),
+            unescape_cacl_string(children[0], self._diagnostics),
             _meta_span(meta),
         )
 
     @v_args(meta=True)
-    def rule_stmt(self, meta, children):
-        effect = Effect(children[0].value)
+    def rule(self, meta, children):
+        effect: Effect = children[0]
         op_items, op_set_span = children[1]
         scope = Scope.ALL
         scope_explicit = False
-        scope_span: Span | None = None
         match_clause: MatchClauseNode | None = None
         time_window: TimeWindowNode | None = None
         remark: str | None = None
         remark_span: Span | None = None
 
         for part in children[2:]:
-            if isinstance(part, tuple) and part[0] == "scope":
-                _, scope, scope_span = part
-                scope_explicit = True
-            elif isinstance(part, MatchClauseNode):
-                match_clause = part
+            if isinstance(part, Scope):
+                scope, scope_explicit = part, True
+            elif isinstance(part, _ToList):
+                match_clause = MatchClauseNode(
+                    syntax="to",
+                    expr=self._fold("or", part.items),
+                    to_items=part.items,
+                    span=part.span,
+                )
             elif isinstance(part, TimeWindowNode):
                 time_window = part
             elif isinstance(part, tuple) and part[0] == "remark":
                 _, remark, remark_span = part
+            else:  # bool_expr following `when`
+                match_clause = MatchClauseNode(
+                    syntax="when", expr=part, span=part.span
+                )
 
         assert match_clause is not None
         return RuleNode(
@@ -267,14 +280,13 @@ class _ASTBuilder(Transformer):
             op_set_span=op_set_span,
             scope=scope,
             scope_explicit=scope_explicit,
-            scope_span=scope_span,
+            scope_span=None,
             match=match_clause,
             time_window=time_window,
             remark=remark,
             remark_span=remark_span,
             span=_meta_span(meta),
         )
-
 
 _LARK_PARSER = Lark.open(
     "cacl.lark",

@@ -16,6 +16,7 @@ from .evaluator import (
     authorize_policy_save,
     evaluate_access,
     evaluate_reparent,
+    evaluate_soft_delete,
 )
 from .identity import (
     InMemoryPrincipalResolver,
@@ -69,6 +70,7 @@ __all__ = [
     "decompile_rule",
     "evaluate_access",
     "evaluate_reparent",
+    "evaluate_soft_delete",
     "format_cacl",
     "format_diagnostics",
     "parse_cacl",

@@ -25,7 +25,7 @@ def _read_input(file_arg: str) -> tuple[str, str]:
     if file_arg == "-":
         return sys.stdin.read(), "<stdin>"
     p = Path(file_arg)
-    return p.read_text(encoding="utf-8"), str(p)
+    return p.read_text(encoding="utf-8-sig"), str(p)
 
 
 def _build_compile_config(args: argparse.Namespace) -> CompilerConfig:

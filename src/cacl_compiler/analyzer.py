@@ -31,7 +31,9 @@ from .parser import parse_cacl
 from .permissions import (
     ATOMIC_OP_BY_NAME,
     DEFAULT_PRESET_MACROS,
+    DIR_APPLICABLE_MASK,
     DIR_ONLY_MASK,
+    DOC_APPLICABLE_MASK,
     DOC_ONLY_MASK,
     ObjectType,
     mask_to_atomic_names,
@@ -49,7 +51,7 @@ class CompilerConfig:
     resolver: PrincipalResolver | None = None
     # When True and resolver is None, allow non-UUID usernames as unresolved symbols (IDE/lint mode).
     allow_unresolved_usernames: bool = False
-    # When True and resolver is present, unknown user UUIDs are errors; False emits warnings.
+    # When True and resolver is present, unknown principals are errors; False emits warnings.
     strict_principal_existence: bool = True
     # Optional target object type context (DIRECTORY or DOCUMENT) for deeper scope diagnostics.
     target_object_type: ObjectType | None = None
@@ -156,7 +158,7 @@ def compile_ast(ast: PolicyAST, config: CompilerConfig | None = None) -> Compile
             )
             return BoolAtom(ConditionAtom(kind, raw, resolved=False))
 
-        if not raw or not raw.strip():
+        if not raw:
             diags.append(
                 Diagnostic(
                     code="E204",
@@ -167,7 +169,8 @@ def compile_ast(ast: PolicyAST, config: CompilerConfig | None = None) -> Compile
             )
             return BoolAtom(ConditionAtom(kind, raw, resolved=False))
 
-        # --- Special handling for USER: canonical UUID vs human username ---
+        # --- The user identifier is always a canonical UUID; a human username is
+        # only accepted when it can be bound to a UUID through a PrincipalResolver. ---
         if kind is PredicateKind.USER:
             parsed_uuid = parse_canonical_uuid(raw)
             if parsed_uuid is not None:
@@ -361,7 +364,7 @@ def _compile_single_rule(
 ) -> CompiledRule | None:
     # A. Operation set algebra & macro expansion
     mask = 0
-    for item in rule.op_items:
+    for idx, item in enumerate(rule.op_items):
         op_meta = ATOMIC_OP_BY_NAME.get(item.name)
         if op_meta is not None:
             item_mask = int(op_meta.op)
@@ -379,12 +382,27 @@ def _compile_single_rule(
             continue
 
         if item.subtract:
-            if (mask & item_mask) == 0:
+            if idx == 0:
+                diags.append(
+                    Diagnostic(
+                        code="E210",
+                        severity=Severity.ERROR,
+                        message=f"The leading operation item must not be negative ('-{item.name}').",
+                        span=item.span,
+                        hint="Start the operation set with an unsigned operation or macro.",
+                    )
+                )
+                continue
+            if (mask & item_mask) != item_mask:
+                missing = mask_to_atomic_names(item_mask & ~mask)
                 diags.append(
                     Diagnostic(
                         code="W201",
                         severity=Severity.WARNING,
-                        message=f"Subtracting '-{item.name}' has no effect; none of its bits are currently set.",
+                        message=(
+                            f"Subtracting '-{item.name}' removes bits that are not currently "
+                            f"present: {missing}."
+                        ),
                         span=item.span,
                     )
                 )
@@ -565,27 +583,22 @@ def _check_scope_compatibility(
     target_type: ObjectType | None,
     diags: list[Diagnostic],
 ) -> None:
-    if rule.scope is Scope.DOCS and (mask & DIR_ONLY_MASK):
-        diags.append(
-            Diagnostic(
-                code="W203",
-                severity=Severity.WARNING,
-                message=(
-                    f"Directory-only operations {mask_to_atomic_names(mask & DIR_ONLY_MASK)} "
-                    "have no effect under scope 'on docs'."
-                ),
-                span=rule.scope_span or rule.op_set_span,
-            )
-        )
-    elif rule.scope is Scope.DIRS and (mask & DOC_ONLY_MASK):
+    # CEP-0002 5.1: warn when the scope can never intersect any applicable operation.
+    if rule.scope is Scope.DIRS and not (mask & DIR_APPLICABLE_MASK):
         diags.append(
             Diagnostic(
                 code="W204",
                 severity=Severity.WARNING,
-                message=(
-                    f"Document-only operations {mask_to_atomic_names(mask & DOC_ONLY_MASK)} "
-                    "have no effect under scope 'on dirs'."
-                ),
+                message="Scope 'on dirs' has no effect: no operation in the set applies to directories.",
+                span=rule.scope_span or rule.op_set_span,
+            )
+        )
+    elif rule.scope is Scope.DOCS and not (mask & DOC_APPLICABLE_MASK):
+        diags.append(
+            Diagnostic(
+                code="W203",
+                severity=Severity.WARNING,
+                message="Scope 'on docs' has no effect: no operation in the set applies to documents.",
                 span=rule.scope_span or rule.op_set_span,
             )
         )

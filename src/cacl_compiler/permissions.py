@@ -236,6 +236,9 @@ DOC_ONLY_MASK: int = sum(
 SHARED_MASK: int = sum(
     int(m.op) for m in ATOMIC_OP_TABLE if m.target is TargetApplicability.BOTH
 )
+# Operations that can apply to at least one directory / document target.
+DIR_APPLICABLE_MASK: int = DIR_ONLY_MASK | SHARED_MASK
+DOC_APPLICABLE_MASK: int = DOC_ONLY_MASK | SHARED_MASK
 
 # Predefined Permission Macros (expanded deterministically at compile time)
 _CREATE_CHILD = AtomicOp.CREATE_DOCUMENT | AtomicOp.CREATE_DIRECTORY
@@ -255,7 +258,7 @@ _PRESET_WRITE = (
     | AtomicOp.SET_CURRENT_REVISION
     | AtomicOp.DELETE
 )
-_PRESET_EDIT = _PRESET_READ | _PRESET_WRITE
+_PRESET_RW = _PRESET_READ | _PRESET_WRITE
 _PRESET_TRASH_MANAGE = (
     AtomicOp.LIST_DELETED
     | AtomicOp.RESTORE
@@ -269,8 +272,7 @@ DEFAULT_PRESET_MACROS: dict[str, int] = {
     "MOVE": int(_MOVE),
     "PRESET_READ": int(_PRESET_READ),
     "PRESET_WRITE": int(_PRESET_WRITE),
-    "PRESET_EDIT": int(_PRESET_EDIT),
-    "PRESET_RW": int(_PRESET_EDIT),  # Alias retained for compatibility
+    "PRESET_RW": int(_PRESET_RW),
     "PRESET_TRASH_MANAGE": int(_PRESET_TRASH_MANAGE),
     "PRESET_ACL_MANAGE": int(_PRESET_ACL_MANAGE),
 }
@@ -285,7 +287,7 @@ def mask_to_folded_tokens(
     mask: int,
     macros: dict[str, int] | None = None,
     prefer_macro_order: tuple[str, ...] = (
-        "PRESET_EDIT",
+        "PRESET_RW",
         "PRESET_READ",
         "PRESET_TRASH_MANAGE",
         "PRESET_ACL_MANAGE",

@@ -31,7 +31,8 @@ class DecompileOptions:
     prefer_to_syntax: bool = (
         True  # Render positive principal-only OR chains as `to ...`
     )
-    omit_default_scope: bool = False  # True omits `on all` for compact style
+    # CEP-0002 canonical form omits the default `on all`; set False to emit it explicitly.
+    omit_default_scope: bool = True
     always_emit_inherit: bool = True
 
 
