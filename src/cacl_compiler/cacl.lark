@@ -1,0 +1,62 @@
+// CACL (CFMS Access Control Language) Grammar
+// Compatible with Lark LALR(1) parser.
+
+start: directive* rule*
+
+directive: "inherit" inherit_state ";"
+inherit_state: "on"  -> inherit_on
+            | "off" -> inherit_off
+
+rule: effect op_set scope_clause? match_clause time_clause? remark_clause? ";"
+
+effect: "allow" -> effect_allow
+        | "deny"  -> effect_deny
+
+op_set: "[" op_item ("," op_item)* "]"
+?op_item: op_add | op_sub
+op_add: IDENT
+op_sub: "-" IDENT
+
+?scope_clause: "on" scope
+scope: "self" -> scope_self
+    | "dirs" -> scope_dirs
+    | "docs" -> scope_docs
+    | "all"  -> scope_all
+
+?match_clause: "to" principal_list
+            | "when" bool_expr
+
+time_clause: valid_from valid_until? -> time_window
+            | valid_until             -> time_window
+
+valid_from:  "from"  STRING
+valid_until: "until" STRING
+
+principal_list: principal ("," principal)*
+?principal: principal_pred | any_pred
+
+?bool_expr: or_expr
+?or_expr: and_expr ("or" and_expr)*
+?and_expr: not_expr ("and" not_expr)*
+?not_expr: neg_expr | atom
+neg_expr: "not" not_expr
+
+?atom: principal_pred
+    | perm_pred
+    | any_pred
+    | "(" bool_expr ")"
+
+principal_pred: PRINCIPAL_KIND "(" STRING ")"
+perm_pred: PERM_KIND "(" STRING ")"
+any_pred: "any"
+
+remark_clause: "remark" STRING
+
+PRINCIPAL_KIND: "user" | "group"
+PERM_KIND: "perm"
+IDENT: /[A-Z][A-Z0-9_]*/
+STRING: /"([^"\\\r\n]|\\.)*"/
+COMMENT: /#[^\r\n]*/
+
+%ignore /[ \t\r\n]+/
+%ignore COMMENT
