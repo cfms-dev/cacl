@@ -60,7 +60,6 @@ def _to_nnf(node: BoolIR, negated: bool = False) -> BoolIR:
                 kind=atom.kind,
                 value=atom.value,
                 negated=(not atom.negated if negated else atom.negated),
-                resolved=atom.resolved,
             )
         )
     if isinstance(node, BoolNot):
@@ -88,9 +87,7 @@ def _simplify_clause(
     """
     # 1. Exact complementary literal check: P and (not P) ==> FALSE
     for a in raw_atoms:
-        complement = ConditionAtom(
-            a.kind, a.value, negated=not a.negated, resolved=a.resolved
-        )
+        complement = ConditionAtom(a.kind, a.value, negated=not a.negated)
         if complement in raw_atoms:
             return None, False
 

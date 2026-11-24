@@ -16,10 +16,9 @@ from .permissions import mask_to_atomic_names, mask_to_folded_tokens
 
 
 class UserRenderMode(str, Enum):
-    UUID = "uuid"  # Always emit canonical UUID (machine-canonical)
-    USERNAME = "username"  # Prefer username via resolver; fallback to UUID if dangling
+    UUID = "uuid"  # Always emit canonical UUID (CEP-0002 canonical form)
     UUID_ANNOTATED = (
-        "uuid_annotated"  # Emit UUID + transient `# @username` trailing audit comment
+        "uuid_annotated"  # Emit UUID + transient `# @username` trailing comment
     )
 
 
@@ -53,20 +52,21 @@ def _render_atom(
     opts: DecompileOptions,
     annotations: list[str],
 ) -> str:
-    rendered_val = atom.value
-    if atom.kind is PredicateKind.USER and opts.resolver is not None:
+    if (
+        atom.kind is PredicateKind.USER
+        and opts.user_mode is UserRenderMode.UUID_ANNOTATED
+        and opts.resolver is not None
+    ):
         try:
             uid = UUID(atom.value)
         except ValueError:
             uid = None
         if uid is not None:
             uname = opts.resolver.resolve_uuid_to_username(uid)
-            if opts.user_mode is UserRenderMode.USERNAME and uname is not None:
-                rendered_val = uname
-            elif opts.user_mode is UserRenderMode.UUID_ANNOTATED and uname is not None:
+            if uname is not None:
                 annotations.append(f"@{uname}")
 
-    base = f"{atom.kind.value}({escape_cacl_string(rendered_val)})"
+    base = f"{atom.kind.value}({escape_cacl_string(atom.value)})"
     return f"not {base}" if atom.negated else base
 
 

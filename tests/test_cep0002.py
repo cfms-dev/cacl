@@ -7,15 +7,18 @@ from uuid import UUID
 import pytest
 
 from cacl_compiler import (
+    DEFAULT_PRESET_MACROS,
     AtomicOp,
     CompilerConfig,
-    DEFAULT_PRESET_MACROS,
+    DecompileOptions,
     InMemoryPrincipalResolver,
-    UserDirectoryEntry,
     NamespaceNode,
     ObjectState,
     ObjectType,
     Subject,
+    UserDirectoryEntry,
+    UserRenderMode,
+    authorize_policy_save,
     compile_cacl,
     decompile_policy,
     evaluate_access,
@@ -23,19 +26,21 @@ from cacl_compiler import (
     evaluate_soft_delete,
 )
 from cacl_compiler.ast_nodes import Scope
+from cacl_compiler.cli import main as cli_main
 
 GRAMMAR = Path(__file__).parents[1] / "src" / "cacl_compiler" / "cacl.lark"
 
 EXAMPLE_A = '''
 inherit on;
-# comment
+# Prohibit reading or destroying historical revisions without audit clearance
 deny [READ_REVISION, DELETE_REVISION] on docs
   when not perm("history_audit")
   remark "Prevent historical snapshot leakage and audit trail tampering";
 allow [PRESET_RW, -RENAME, -DELETE]
-  to user("alice"), group("external_editors")
+  to user("5a52345a-ae51-4516-b277-bbd94b99d73a"), # external_bob
+     group("external_editors")
   remark "External collaborators restricted to content iteration";
-allow [PRESET_TRASH_MANAGE] on dirs
+allow [PRESET_TRASH_RW] on dirs
   when (group("core_dev") and perm("vault_write")) or group("sec_auditors");
 '''
 
@@ -54,7 +59,7 @@ allow [READ_CONTENT, READ_METADATA] on docs
 EXAMPLE_C = '''
 inherit on;
 allow [PRESET_READ, LIST_REVISIONS] on docs
-  to user("auditor_li")
+  to user("5548914a-1297-48f2-8c35-274d222f4338") # auditor_li
   from "2026-12-01T00:00:00Z" until "2026-12-16T00:00:00Z"
   remark "2026 Q4 external audit window";
 allow [PRESET_WRITE] on all
@@ -69,14 +74,14 @@ deny [WRITE_CONTENT, DELETE, PURGE] on all
 
 NOW = datetime(2026, 11, 24, tzinfo=UTC)
 
-# A user identifier is always a UUID.
+# A user identifier is always a canonical 36-char RFC 9562 UUID.
 U_ALICE = UUID("11111111-1111-4111-8111-111111111111")
-U_BOB = UUID("22222222-2222-4222-8222-222222222222")
-U_LI = UUID("33333333-3333-4333-8333-333333333333")
+U_BOB = UUID("5a52345a-ae51-4516-b277-bbd94b99d73a")
+U_LI = UUID("5548914a-1297-48f2-8c35-274d222f4338")
 DIRECTORY = InMemoryPrincipalResolver(
     users=[
         UserDirectoryEntry(U_ALICE, "alice"),
-        UserDirectoryEntry(U_BOB, "bob"),
+        UserDirectoryEntry(U_BOB, "external_bob"),
         UserDirectoryEntry(U_LI, "auditor_li"),
     ]
 )
@@ -102,13 +107,22 @@ def test_21_atomic_ops_fixed_bits():
 def test_macros_exactly_as_specified():
     assert set(DEFAULT_PRESET_MACROS) == {
         "CREATE_CHILD", "MOVE", "PRESET_READ", "PRESET_WRITE", "PRESET_RW",
-        "PRESET_TRASH_MANAGE", "PRESET_ACL_MANAGE",
+        "PRESET_TRASH_RW", "PRESET_ACL_RW",
     }  # fmt: skip
     m = DEFAULT_PRESET_MACROS
     assert m["PRESET_RW"] == m["PRESET_READ"] | m["PRESET_WRITE"]
+    assert m["PRESET_TRASH_RW"] == int(
+        AtomicOp.LIST_DELETED
+        | AtomicOp.RESTORE
+        | AtomicOp.PURGE
+        | AtomicOp.DIRECTORY_DELETE_CHILD
+    )
+    assert m["PRESET_ACL_RW"] == int(AtomicOp.READ_DACL | AtomicOp.WRITE_DACL)
     for excluded in ("READ_REVISION", "DELETE_REVISION", "PURGE", "READ_DACL", "WRITE_DACL"):
         assert not m["PRESET_WRITE"] & AtomicOp[excluded]
     assert not compile_('allow [PRESET_EDIT] to any;').ok
+    assert "E202" in codes(compile_('allow [PRESET_TRASH_MANAGE] to any;'))
+    assert "E202" in codes(compile_('allow [PRESET_ACL_MANAGE] to any;'))
 
 
 # --- Section 4: grammar -----------------------------------------------------
@@ -118,14 +132,20 @@ def test_grammar_matches_spec_text():
     text = GRAMMAR.read_text(encoding="utf-8")
     assert 'rule: effect op_set scope_clause? match_clause time_clause? remark_clause? ";"' in text
     assert "start: directive* rule*" in text
+    assert 'PRINCIPAL_KIND: "user" | "group"' in text
 
 
 @pytest.mark.parametrize("src", [EXAMPLE_A, EXAMPLE_B, EXAMPLE_C])
-def test_spec_examples_compile_with_directory(src):
-    # The examples name users by username; the identity layer binds them to UUIDs.
-    res = compile_(src, resolver=DIRECTORY)
+def test_spec_examples_compile_statelessly(src):
+    # All normative CEP-0002 examples compile completely statelessly with no resolver.
+    res = compile_(src)
     assert res.ok, res.diagnostics
     assert not res.errors
+
+
+def test_role_predicate_rejected():
+    res = compile_('allow [TRAVERSE] to role("admin");')
+    assert not res.ok and "E101" in codes(res)
 
 
 def test_to_equals_when_or():
@@ -181,7 +201,9 @@ def test_leading_negative_item_is_error():
 
 def test_unknown_identifier_and_empty_mask_errors():
     assert "E202" in codes(compile_("allow [NOPE] to any;"))
-    assert "E203" in codes(compile_("allow [RENAME, -RENAME] to any;"))
+    empty_res = compile_("allow [RENAME, -RENAME] on dirs to any;")
+    assert "E203" in codes(empty_res)
+    assert not (codes(empty_res) & {"W203", "W204"})
 
 
 def test_subtracting_absent_bit_warns():
@@ -206,31 +228,70 @@ def test_scope_intersection_warnings():
 
 def test_predicate_literals():
     assert not compile_('allow [TRAVERSE] to user("");').ok
+    assert not compile_('allow [TRAVERSE] to group("");').ok
     assert not compile_('allow [TRAVERSE] when perm("");').ok
-    assert compile_('allow [TRAVERSE] to group(" ");').ok  # non-empty after unescaping
+    # group() and perm() are opaque non-empty strings without rigid charset restrictions
+    assert compile_('allow [TRAVERSE] to group(" ");').ok
+    assert compile_('allow [TRAVERSE] to group("core_dev:研发/1");').ok
+    assert compile_('allow [TRAVERSE] when perm("vault.write:v2");').ok
 
 
-def test_user_identifier_must_be_uuid():
-    res = compile_('allow [TRAVERSE] to user("alice");')
+@pytest.mark.parametrize(
+    "bad_id",
+    [
+        "alice",
+        "alice@example.com",
+        "not-a-uuid",
+        "1",
+        "5a52345aae514516b277bbd94b99d73a",  # unhyphenated 32-hex
+        "{5a52345a-ae51-4516-b277-bbd94b99d73a}",  # braced
+        "urn:uuid:5a52345a-ae51-4516-b277-bbd94b99d73a",  # URN
+        " 5a52345a-ae51-4516-b277-bbd94b99d73a",  # leading whitespace
+        "5a52345a-ae51-4516-b277-bbd94b99d73a ",  # trailing whitespace
+        "5a52345a-ae51-4516-b277-bbd94b99d73a\\n",  # escaped trailing newline
+        "5a52345-aae51-4516-b277-bbd94b99d73a",  # wrong hyphen placement
+        "5a52345g-ae51-4516-b277-bbd94b99d73a",  # non-hex char
+    ],
+)
+def test_user_identifier_must_be_strict_rfc9562_uuid(bad_id):
+    res = compile_(f'allow [TRAVERSE] to user("{bad_id}");')
     assert not res.ok and "E302" in codes(res)
-    assert not compile_('allow [TRAVERSE] to user("not-a-uuid");').ok
-    assert not compile_('allow [TRAVERSE] when not user("1");').ok
+    # Mutable usernames remain prohibited even when a directory resolver is attached
+    res_with_dir = compile_(f'allow [TRAVERSE] to user("{bad_id}");', resolver=DIRECTORY)
+    assert not res_with_dir.ok and "E302" in codes(res_with_dir)
 
 
-def test_user_uuid_is_canonicalised():
-    p = compile_(f'allow [TRAVERSE] to user("{str(U_ALICE).upper()}");').policy
-    assert p.rules[0].dnf_clauses[0].atoms[0].value == str(U_ALICE)
+@pytest.mark.parametrize(
+    "valid_uuid",
+    [
+        "00000000-0000-0000-0000-000000000000",  # Nil UUID
+        "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF",  # Max UUID (uppercase)
+        "12345678-1234-9ABC-0123-456789ABCDEF",  # Non-standard version/variant bits
+        "5A52345A-AE51-4516-B277-BBD94B99D73A",  # Uppercase v4
+    ],
+)
+def test_user_uuid_version_agnostic_and_canonicalised(valid_uuid):
+    res = compile_(f'allow [TRAVERSE] to user("{valid_uuid}");')
+    assert res.ok, res.diagnostics
+    assert res.policy.rules[0].dnf_clauses[0].atoms[0].value == valid_uuid.lower()
 
 
-def test_username_bound_to_uuid_via_resolver():
-    p = compile_('allow [TRAVERSE] to user("alice");', resolver=DIRECTORY).policy
-    assert p.rules[0].dnf_clauses[0].atoms[0].value == str(U_ALICE)
-    assert "E301" in codes(compile_('allow [TRAVERSE] to user("zed");', resolver=DIRECTORY))
+def test_duplicate_user_uuid_case_variant_warns():
+    res = compile_(f'allow [TRAVERSE] to user("{str(U_ALICE).upper()}"), user("{U_ALICE}");')
+    assert res.ok and "W208" in codes(res)
 
 
-def test_symbolic_username_lint_mode_is_not_ssot_ready():
-    res = compile_('allow [TRAVERSE] to user("alice");', allow_unresolved_usernames=True)
-    assert res.ok and "W303" in codes(res) and res.policy.ssot_ready is False
+def test_optional_directory_existence_check_for_uuid():
+    unknown = "99999999-9999-4999-8999-999999999999"
+    assert compile_(f'allow [TRAVERSE] to user("{U_ALICE}");', resolver=DIRECTORY).ok
+    res_err = compile_(f'allow [TRAVERSE] to user("{unknown}");', resolver=DIRECTORY)
+    assert not res_err.ok and "E301" in codes(res_err)
+    res_warn = compile_(
+        f'allow [TRAVERSE] to user("{unknown}");',
+        resolver=DIRECTORY,
+        strict_principal_existence=False,
+    )
+    assert res_warn.ok and "W301" in codes(res_warn)
 
 
 @pytest.mark.parametrize(
@@ -288,10 +349,35 @@ def test_canonical_decompilation():
 
 def test_decompile_roundtrip_examples():
     for src in (EXAMPLE_A, EXAMPLE_B, EXAMPLE_C):
-        p = compile_(src, resolver=DIRECTORY).policy
+        p = compile_(src).policy
         text = decompile_policy(p)
-        assert "alice" not in text  # persisted as UUIDs
+        assert "external_bob" not in text and "auditor_li" not in text
         assert compile_(text).policy.rules == p.rules  # stateless recompile
+
+
+def test_decompile_uuid_annotated_roundtrip():
+    p = compile_(EXAMPLE_A).policy
+    annotated = decompile_policy(
+        p,
+        DecompileOptions(resolver=DIRECTORY, user_mode=UserRenderMode.UUID_ANNOTATED),
+    )
+    assert f'user("{U_BOB}")' in annotated
+    assert "# @external_bob" in annotated
+    assert compile_(annotated).policy.rules == p.rules
+
+
+def test_cli_check_and_fmt_canonical(tmp_path: Path, capsys):
+    policy_file = tmp_path / "example_a.cacl"
+    policy_file.write_text(EXAMPLE_A, encoding="utf-8")
+    assert cli_main(["check", str(policy_file)]) == 0
+    assert cli_main(["fmt", str(policy_file)]) == 0
+    out = capsys.readouterr().out
+    assert f'user("{U_BOB}")' in out
+    assert "PRESET_TRASH_RW" not in out  # canonical form expands macros
+
+    bad_file = tmp_path / "legacy.cacl"
+    bad_file.write_text('allow [PRESET_TRASH_MANAGE] to user("alice");', encoding="utf-8")
+    assert cli_main(["check", str(bad_file)]) == 1
 
 
 # --- Section 6 runtime ----------------------------------------------------------
@@ -420,3 +506,29 @@ def test_soft_delete_non_empty_directory():
     # DIRECTORY_DELETE_CHILD alone never substitutes for DELETE on the target
     only_bypass = [node("d", D, base + "allow [DIRECTORY_DELETE_CHILD] to any;")]
     assert not evaluate_soft_delete(ALICE, only_bypass, [], T).allowed
+
+
+def test_composite_evaluators_forward_bypass_traverse():
+    root_no_traverse = node("root", D)
+    src_doc = node("x", F, "allow [REPARENT] to any;")
+    dst_dir = node("dst", D, "allow [CREATE_DOCUMENT] to any;")
+    assert not evaluate_reparent(ALICE, [root_no_traverse, src_doc], [root_no_traverse, dst_dir], T).allowed
+    assert evaluate_reparent(
+        ALICE,
+        [root_no_traverse, src_doc],
+        [root_no_traverse, dst_dir],
+        T,
+        check_ancestor_traverse=False,
+    ).allowed
+
+    dacl_doc = node("p", F, "allow [WRITE_DACL] to any;")
+    proposed = compile_("inherit off;").policy
+    assert not authorize_policy_save(ALICE, [root_no_traverse, dacl_doc], proposed, T).authorized
+    save_res = authorize_policy_save(
+        ALICE,
+        [root_no_traverse, dacl_doc],
+        proposed,
+        T,
+        check_ancestor_traverse=False,
+    )
+    assert save_res.authorized and save_res.self_lockout_warning

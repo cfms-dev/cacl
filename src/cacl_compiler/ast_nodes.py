@@ -20,7 +20,6 @@ class PredicateKind(str, Enum):
     USER = "user"
     GROUP = "group"
     PERM = "perm"
-    ROLE = "role"  # Optional extension (disabled by default in strict CEP-0002 mode)
 
 
 @dataclass(frozen=True, slots=True)

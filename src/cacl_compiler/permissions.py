@@ -259,13 +259,13 @@ _PRESET_WRITE = (
     | AtomicOp.DELETE
 )
 _PRESET_RW = _PRESET_READ | _PRESET_WRITE
-_PRESET_TRASH_MANAGE = (
+_PRESET_TRASH_RW = (
     AtomicOp.LIST_DELETED
     | AtomicOp.RESTORE
     | AtomicOp.PURGE
     | AtomicOp.DIRECTORY_DELETE_CHILD
 )
-_PRESET_ACL_MANAGE = AtomicOp.READ_DACL | AtomicOp.WRITE_DACL
+_PRESET_ACL_RW = AtomicOp.READ_DACL | AtomicOp.WRITE_DACL
 
 DEFAULT_PRESET_MACROS: dict[str, int] = {
     "CREATE_CHILD": int(_CREATE_CHILD),
@@ -273,8 +273,8 @@ DEFAULT_PRESET_MACROS: dict[str, int] = {
     "PRESET_READ": int(_PRESET_READ),
     "PRESET_WRITE": int(_PRESET_WRITE),
     "PRESET_RW": int(_PRESET_RW),
-    "PRESET_TRASH_MANAGE": int(_PRESET_TRASH_MANAGE),
-    "PRESET_ACL_MANAGE": int(_PRESET_ACL_MANAGE),
+    "PRESET_TRASH_RW": int(_PRESET_TRASH_RW),
+    "PRESET_ACL_RW": int(_PRESET_ACL_RW),
 }
 
 
@@ -289,8 +289,9 @@ def mask_to_folded_tokens(
     prefer_macro_order: tuple[str, ...] = (
         "PRESET_RW",
         "PRESET_READ",
-        "PRESET_TRASH_MANAGE",
-        "PRESET_ACL_MANAGE",
+        "PRESET_WRITE",
+        "PRESET_TRASH_RW",
+        "PRESET_ACL_RW",
         "CREATE_CHILD",
         "MOVE",
     ),

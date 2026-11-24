@@ -23,7 +23,7 @@ def _load_resolver(path: str | None) -> InMemoryPrincipalResolver | None:
 
 def _read_input(file_arg: str) -> tuple[str, str]:
     if file_arg == "-":
-        return sys.stdin.read(), "<stdin>"
+        return sys.stdin.read().removeprefix("\ufeff"), "<stdin>"
     p = Path(file_arg)
     return p.read_text(encoding="utf-8-sig"), str(p)
 
@@ -31,12 +31,10 @@ def _read_input(file_arg: str) -> tuple[str, str]:
 def _build_compile_config(args: argparse.Namespace) -> CompilerConfig:
     return CompilerConfig(
         resolver=_load_resolver(getattr(args, "users", None)),
-        allow_unresolved_usernames=getattr(args, "allow_symbolic_users", False),
         strict_principal_existence=not getattr(args, "no_strict_principals", False),
         target_object_type=ObjectType(args.target_type)
         if getattr(args, "target_type", None)
         else None,
-        allow_role_predicate=getattr(args, "allow_role", False),
     )
 
 
@@ -203,12 +201,8 @@ def main(argv: list[str] | None = None) -> int:
 
     def add_common_compile_flags(p: argparse.ArgumentParser) -> None:
         p.add_argument(
-            "--users", help="Path to JSON principal directory (users/groups/perms)"
-        )
-        p.add_argument(
-            "--allow-symbolic-users",
-            action="store_true",
-            help="Allow unresolved usernames (lint mode)",
+            "--users",
+            help="Path to JSON principal directory for optional existence checks / # comment annotations",
         )
         p.add_argument(
             "--no-strict-principals",
@@ -219,11 +213,6 @@ def main(argv: list[str] | None = None) -> int:
             "--target-type",
             choices=["directory", "document"],
             help="Target object type hint",
-        )
-        p.add_argument(
-            "--allow-role",
-            action="store_true",
-            help="Enable optional role(...) predicate extension",
         )
 
     p_check = sub.add_parser(
@@ -254,10 +243,11 @@ def main(argv: list[str] | None = None) -> int:
     p_dec.add_argument("file", help="Path to compiled IR JSON (or '-')")
     p_dec.add_argument("-o", "--output", help="Output .cacl path")
     p_dec.add_argument(
-        "--users", help="Principal directory JSON for UUID -> username reverse lookup"
+        "--users",
+        help="Principal directory JSON for UUID -> # @username comment annotations",
     )
     p_dec.add_argument(
-        "--user-mode", choices=["uuid", "username", "uuid_annotated"], default="uuid"
+        "--user-mode", choices=["uuid", "uuid_annotated"], default="uuid"
     )
     p_dec.add_argument(
         "--fold-presets",
@@ -276,8 +266,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_fmt.add_argument(
         "--user-mode",
-        choices=["uuid", "username", "uuid_annotated"],
-        default="username",
+        choices=["uuid", "uuid_annotated"],
+        default="uuid",
     )
     p_fmt.add_argument("--fold-presets", action="store_true")
     p_fmt.add_argument("--always-when", action="store_true")

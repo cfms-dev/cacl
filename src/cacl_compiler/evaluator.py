@@ -27,7 +27,6 @@ class Subject:
     username: str | None = None
     groups: frozenset[str] = frozenset()
     perms: frozenset[str] = frozenset()
-    roles: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,8 +89,6 @@ def _eval_atom(atom: ConditionAtom, subject: Subject) -> bool:
         matched = atom.value in subject.groups
     elif atom.kind is PredicateKind.PERM:
         matched = atom.value in subject.perms
-    elif atom.kind is PredicateKind.ROLE:
-        matched = atom.value in subject.roles
     else:
         matched = False
     return (not matched) if atom.negated else matched
@@ -291,12 +288,13 @@ def evaluate_access(
 
 
 def evaluate_reparent(
-    subject: Subject,
+    subject: Subject | None,
     source_path: list[NamespaceNode],
     dest_parent_path: list[NamespaceNode],
     eval_time_utc: datetime | None = None,
     redlines: list[RedlineHook] | None = None,
     also_rename: bool = False,
+    check_ancestor_traverse: bool = True,
 ) -> EvalDecision:
     """Step 5: composite authorization for reparenting (optionally with a rename).
 
@@ -304,12 +302,18 @@ def evaluate_reparent(
     destination parent. If the same operation also changes the name (``also_rename``),
     RENAME on the source is required as well.
     """
+    now = (eval_time_utc or datetime.now(UTC)).astimezone(UTC)
     required_source_ops = [AtomicOp.REPARENT]
     if also_rename:
         required_source_ops.append(AtomicOp.RENAME)
     for src_op in required_source_ops:
         src_decision = evaluate_access(
-            subject, source_path, src_op, eval_time_utc, redlines
+            subject,
+            source_path,
+            src_op,
+            now,
+            redlines,
+            check_ancestor_traverse=check_ancestor_traverse,
         )
         if not src_decision.allowed:
             return EvalDecision(
@@ -327,7 +331,12 @@ def evaluate_reparent(
         else AtomicOp.CREATE_DIRECTORY
     )
     dst_decision = evaluate_access(
-        subject, dest_parent_path, dest_op, eval_time_utc, redlines
+        subject,
+        dest_parent_path,
+        dest_op,
+        now,
+        redlines,
+        check_ancestor_traverse=check_ancestor_traverse,
     )
     if not dst_decision.allowed:
         return EvalDecision(
@@ -345,11 +354,12 @@ def evaluate_reparent(
 
 
 def evaluate_soft_delete(
-    subject: Subject,
+    subject: Subject | None,
     target_path: list[NamespaceNode],
     descendant_paths: Sequence[list[NamespaceNode]] = (),
     eval_time_utc: datetime | None = None,
     redlines: list[RedlineHook] | None = None,
+    check_ancestor_traverse: bool = True,
 ) -> EvalDecision:
     """Step 5: soft-deleting an object, including non-empty directories.
 
@@ -358,7 +368,15 @@ def evaluate_soft_delete(
     the subject must additionally hold DIRECTORY_DELETE_CHILD on the target directory
     or DELETE on every affected descendant.
     """
-    own = evaluate_access(subject, target_path, AtomicOp.DELETE, eval_time_utc, redlines)
+    now = (eval_time_utc or datetime.now(UTC)).astimezone(UTC)
+    own = evaluate_access(
+        subject,
+        target_path,
+        AtomicOp.DELETE,
+        now,
+        redlines,
+        check_ancestor_traverse=check_ancestor_traverse,
+    )
     if not own.allowed:
         return EvalDecision(
             allowed=False,
@@ -375,7 +393,12 @@ def evaluate_soft_delete(
         )
 
     bypass = evaluate_access(
-        subject, target_path, AtomicOp.DIRECTORY_DELETE_CHILD, eval_time_utc, redlines
+        subject,
+        target_path,
+        AtomicOp.DIRECTORY_DELETE_CHILD,
+        now,
+        redlines,
+        check_ancestor_traverse=check_ancestor_traverse,
     )
     if bypass.allowed:
         return EvalDecision(
@@ -384,7 +407,14 @@ def evaluate_soft_delete(
             step="5_composite_allowed",
         )
     for path in descendant_paths:
-        child = evaluate_access(subject, path, AtomicOp.DELETE, eval_time_utc, redlines)
+        child = evaluate_access(
+            subject,
+            path,
+            AtomicOp.DELETE,
+            now,
+            redlines,
+            check_ancestor_traverse=check_ancestor_traverse,
+        )
         if not child.allowed:
             return EvalDecision(
                 allowed=False,
@@ -411,15 +441,22 @@ class SaveAuthzResult:
 
 
 def authorize_policy_save(
-    actor: Subject,
+    actor: Subject | None,
     current_path: list[NamespaceNode],
     proposed_policy: CompiledPolicy,
     eval_time_utc: datetime | None = None,
     redlines: list[RedlineHook] | None = None,
+    check_ancestor_traverse: bool = True,
 ) -> SaveAuthzResult:
     """CEP-0002 Section 5.2 Save-time authorization (WRITE_DACL + anti-lockout advisory)."""
+    now = (eval_time_utc or datetime.now(UTC)).astimezone(UTC)
     check = evaluate_access(
-        actor, current_path, AtomicOp.WRITE_DACL, eval_time_utc, redlines
+        actor,
+        current_path,
+        AtomicOp.WRITE_DACL,
+        now,
+        redlines,
+        check_ancestor_traverse=check_ancestor_traverse,
     )
     if not check.allowed:
         return SaveAuthzResult(
@@ -439,8 +476,9 @@ def authorize_policy_save(
         actor,
         current_path[:-1] + [simulated_target],
         AtomicOp.WRITE_DACL,
-        eval_time_utc,
+        now,
         redlines,
+        check_ancestor_traverse=check_ancestor_traverse,
     )
     return SaveAuthzResult(
         authorized=True,

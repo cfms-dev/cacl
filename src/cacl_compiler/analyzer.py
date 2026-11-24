@@ -40,7 +40,7 @@ from .permissions import (
 )
 
 _RFC3339_RE = re.compile(
-    r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:[Zz]|[+-]\d{2}:\d{2})$"
+    r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})\Z"
 )
 
 
@@ -49,16 +49,12 @@ class CompilerConfig:
     """Configuration knobs for standalone compilation."""
 
     resolver: PrincipalResolver | None = None
-    # When True and resolver is None, allow non-UUID usernames as unresolved symbols (IDE/lint mode).
-    allow_unresolved_usernames: bool = False
     # When True and resolver is present, unknown principals are errors; False emits warnings.
     strict_principal_existence: bool = True
     # Optional target object type context (DIRECTORY or DOCUMENT) for deeper scope diagnostics.
     target_object_type: ObjectType | None = None
     # Reference UTC clock for expired-rule warnings (defaults to current UTC time).
     now_utc: datetime | None = None
-    # CEP-0002 defines user/group/perm; toggle True only if using an extended dialect with role().
-    allow_role_predicate: bool = False
     # Custom macro table override (defaults to CEP-0002 presets).
     macros: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_PRESET_MACROS))
     # Guard against exponential DNF blowup.
@@ -109,7 +105,6 @@ def compile_ast(ast: PolicyAST, config: CompilerConfig | None = None) -> Compile
     cfg = config or CompilerConfig()
     diags: list[Diagnostic] = []
     now_utc = (cfg.now_utc or datetime.now(UTC)).astimezone(UTC)
-    ssot_ready = True
 
     # 1. Directive uniqueness check
     inherit_enabled = True
@@ -128,7 +123,6 @@ def compile_ast(ast: PolicyAST, config: CompilerConfig | None = None) -> Compile
 
     # Helper: resolve predicate node into BoolIR
     def resolve_expr(node: ExprNode) -> BoolIR:
-        nonlocal ssot_ready
         if isinstance(node, AnyExprNode):
             return BoolConst(True)
         if isinstance(node, NotExprNode):
@@ -142,21 +136,8 @@ def compile_ast(ast: PolicyAST, config: CompilerConfig | None = None) -> Compile
         raise TypeError(f"Unknown AST expr node: {type(node)!r}")
 
     def resolve_predicate(node: PredicateExprNode) -> BoolIR:
-        nonlocal ssot_ready
         kind = node.kind
         raw = node.raw_value
-
-        if kind is PredicateKind.ROLE and not cfg.allow_role_predicate:
-            diags.append(
-                Diagnostic(
-                    code="E209",
-                    severity=Severity.ERROR,
-                    message="Predicate 'role(...)' is disabled in strict CEP-0002 mode.",
-                    span=node.span,
-                    hint="Use user(...), group(...), or perm(...), or enable allow_role_predicate.",
-                )
-            )
-            return BoolAtom(ConditionAtom(kind, raw, resolved=False))
 
         if not raw:
             diags.append(
@@ -167,90 +148,44 @@ def compile_ast(ast: PolicyAST, config: CompilerConfig | None = None) -> Compile
                     span=node.span,
                 )
             )
-            return BoolAtom(ConditionAtom(kind, raw, resolved=False))
+            return BoolAtom(ConditionAtom(kind, raw))
 
-        # --- The user identifier is always a canonical UUID; a human username is
-        # only accepted when it can be bound to a UUID through a PrincipalResolver. ---
+        # CEP-0002 §4 & §5.1(5): user("id") must strictly conform to 36-char RFC 9562 UUID.
         if kind is PredicateKind.USER:
             parsed_uuid = parse_canonical_uuid(raw)
-            if parsed_uuid is not None:
-                canonical_id = str(parsed_uuid)
-                if cfg.resolver is not None and not cfg.resolver.user_exists(
-                    parsed_uuid
-                ):
-                    # Edge case: check if a username happens to look like this UUID
-                    by_name = cfg.resolver.resolve_username_to_uuid(raw)
-                    if by_name is not None:
-                        diags.append(
-                            Diagnostic(
-                                code="W302",
-                                severity=Severity.WARNING,
-                                message=(
-                                    f"Identifier '{raw}' looks like a UUID but matched a username "
-                                    f"mapped to UUID '{by_name}'."
-                                ),
-                                span=node.span,
-                            )
-                        )
-                        return BoolAtom(ConditionAtom(kind, str(by_name)))
-                    sev = (
-                        Severity.ERROR
-                        if cfg.strict_principal_existence
-                        else Severity.WARNING
-                    )
-                    diags.append(
-                        Diagnostic(
-                            code="E301" if sev is Severity.ERROR else "W301",
-                            severity=sev,
-                            message=f"User UUID '{canonical_id}' does not exist in principal directory.",
-                            span=node.span,
-                        )
-                    )
-                return BoolAtom(ConditionAtom(kind, canonical_id))
-
-            # Non-UUID string -> treat as username
-            if cfg.resolver is None:
-                if cfg.allow_unresolved_usernames:
-                    ssot_ready = False
-                    diags.append(
-                        Diagnostic(
-                            code="W303",
-                            severity=Severity.WARNING,
-                            message=(
-                                f"Username '{raw}' could not be bound to a UUID without a PrincipalResolver; "
-                                "compiled output is not SSOT-ready."
-                            ),
-                            span=node.span,
-                            hint="Provide a PrincipalResolver (or --users directory) or use canonical UUIDs.",
-                        )
-                    )
-                    return BoolAtom(ConditionAtom(kind, raw, resolved=False))
+            if parsed_uuid is None:
                 diags.append(
                     Diagnostic(
                         code="E302",
                         severity=Severity.ERROR,
                         message=(
-                            f"User identifier '{raw}' is not a valid UUID and no PrincipalResolver "
-                            "was configured to resolve usernames."
+                            f"User identifier '{raw}' is not a valid 36-character hyphenated RFC 9562 UUID."
                         ),
                         span=node.span,
-                        hint="Pass a valid RFC 4122 UUID or attach a PrincipalResolver.",
+                        hint=(
+                            "Use a canonical 8-4-4-4-12 hexadecimal UUID; mutable usernames "
+                            "are prohibited in CACL syntax."
+                        ),
                     )
                 )
-                return BoolAtom(ConditionAtom(kind, raw, resolved=False))
+                return BoolAtom(ConditionAtom(kind, raw))
 
-            resolved_uid = cfg.resolver.resolve_username_to_uuid(raw)
-            if resolved_uid is None:
+            canonical_id = str(parsed_uuid)
+            if cfg.resolver is not None and not cfg.resolver.user_exists(parsed_uuid):
+                sev = (
+                    Severity.ERROR
+                    if cfg.strict_principal_existence
+                    else Severity.WARNING
+                )
                 diags.append(
                     Diagnostic(
-                        code="E301",
-                        severity=Severity.ERROR,
-                        message=f"Unknown username '{raw}': cannot resolve to a user UUID.",
+                        code="E301" if sev is Severity.ERROR else "W301",
+                        severity=sev,
+                        message=f"User UUID '{canonical_id}' does not exist in principal directory.",
                         span=node.span,
                     )
                 )
-                return BoolAtom(ConditionAtom(kind, raw, resolved=False))
-            return BoolAtom(ConditionAtom(kind, str(resolved_uid)))
+            return BoolAtom(ConditionAtom(kind, canonical_id))
 
         # --- GROUP & PERM existence checks (if resolver supports them) ---
         if kind is PredicateKind.GROUP and cfg.resolver is not None:
@@ -349,7 +284,6 @@ def compile_ast(ast: PolicyAST, config: CompilerConfig | None = None) -> Compile
         else CompiledPolicy(
             inherit=inherit_enabled,
             rules=tuple(compiled_rules),
-            ssot_ready=ssot_ready,
         )
     )
     return CompileResult(policy=policy, diagnostics=diags)
@@ -448,7 +382,12 @@ def _compile_single_rule(
                             hint=f'Use: when perm("{item.raw_value}")',
                         )
                     )
-                key = (item.kind.value, item.raw_value)
+                norm_val = (
+                    item.raw_value.lower()
+                    if item.kind is PredicateKind.USER
+                    else item.raw_value
+                )
+                key = (item.kind.value, norm_val)
                 if key in seen_to:
                     diags.append(
                         Diagnostic(
@@ -584,24 +523,25 @@ def _check_scope_compatibility(
     diags: list[Diagnostic],
 ) -> None:
     # CEP-0002 5.1: warn when the scope can never intersect any applicable operation.
-    if rule.scope is Scope.DIRS and not (mask & DIR_APPLICABLE_MASK):
-        diags.append(
-            Diagnostic(
-                code="W204",
-                severity=Severity.WARNING,
-                message="Scope 'on dirs' has no effect: no operation in the set applies to directories.",
-                span=rule.scope_span or rule.op_set_span,
+    if mask != 0:
+        if rule.scope is Scope.DIRS and not (mask & DIR_APPLICABLE_MASK):
+            diags.append(
+                Diagnostic(
+                    code="W204",
+                    severity=Severity.WARNING,
+                    message="Scope 'on dirs' has no effect: no operation in the set applies to directories.",
+                    span=rule.scope_span or rule.op_set_span,
+                )
             )
-        )
-    elif rule.scope is Scope.DOCS and not (mask & DOC_APPLICABLE_MASK):
-        diags.append(
-            Diagnostic(
-                code="W203",
-                severity=Severity.WARNING,
-                message="Scope 'on docs' has no effect: no operation in the set applies to documents.",
-                span=rule.scope_span or rule.op_set_span,
+        elif rule.scope is Scope.DOCS and not (mask & DOC_APPLICABLE_MASK):
+            diags.append(
+                Diagnostic(
+                    code="W203",
+                    severity=Severity.WARNING,
+                    message="Scope 'on docs' has no effect: no operation in the set applies to documents.",
+                    span=rule.scope_span or rule.op_set_span,
+                )
             )
-        )
 
     if target_type is ObjectType.DOCUMENT:
         if rule.scope is Scope.DIRS:

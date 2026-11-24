@@ -49,7 +49,7 @@
         },
         {
           "name": "constant.other.macro.cacl",
-          "match": "\\b(CREATE_CHILD|MOVE|PRESET_(?:READ|WRITE|RW|TRASH_MANAGE|ACL_MANAGE))\\b"
+          "match": "\\b(CREATE_CHILD|MOVE|PRESET_(?:READ|WRITE|RW|TRASH_RW|ACL_RW))\\b"
         },
         {
           "name": "entity.name.type.operation.cacl",
@@ -79,7 +79,7 @@
       }
     },
     "predicate": {
-      "match": "\\b(user|group|role|perm)(?=\\s*\\()",
+      "match": "\\b(user|group|perm)(?=\\s*\\()",
       "captures": {
         "1": { "name": "support.function.predicate.cacl" }
       }

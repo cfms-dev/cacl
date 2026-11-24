@@ -22,7 +22,6 @@ class ConditionAtom:
     kind: PredicateKind
     value: str  # Canonical lowercase UUID for USER; string ID for GROUP/PERM
     negated: bool = False
-    resolved: bool = True  # False only if offline symbolic username mode was enabled
 
     def sort_key(self) -> tuple[str, str, bool]:
         return (self.kind.value, self.value, self.negated)
@@ -32,7 +31,6 @@ class ConditionAtom:
             "kind": self.kind.value,
             "value": self.value,
             "is_negated": self.negated,
-            "resolved": self.resolved,
         }
 
     @classmethod
@@ -41,7 +39,6 @@ class ConditionAtom:
             kind=PredicateKind(data["kind"]),
             value=data["value"],
             negated=bool(data.get("is_negated", False)),
-            resolved=bool(data.get("resolved", True)),
         )
 
 
@@ -141,7 +138,6 @@ class CompiledRule:
 class CompiledPolicy:
     inherit: bool
     rules: tuple[CompiledRule, ...]
-    ssot_ready: bool = True
 
     def fingerprint(self) -> str:
         """Deterministic SHA-256 fingerprint of the compiled policy semantics."""
@@ -152,7 +148,6 @@ class CompiledPolicy:
         return {
             "spec": "CEP-0002",
             "inherit": self.inherit,
-            "ssot_ready": self.ssot_ready,
             "rules": [r.to_dict() for r in self.rules],
         }
 
@@ -208,5 +203,4 @@ class CompiledPolicy:
         return cls(
             inherit=bool(data["inherit"]),
             rules=tuple(CompiledRule.from_dict(r) for r in data.get("rules", [])),
-            ssot_ready=bool(data.get("ssot_ready", True)),
         )
