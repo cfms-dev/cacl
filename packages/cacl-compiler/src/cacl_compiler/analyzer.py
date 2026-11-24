@@ -25,7 +25,7 @@ from .dnf import (
     DNFComplexityError,
     lower_to_dnf,
 )
-from .identity import BatchPrincipalResolver, PrincipalResolver, parse_canonical_uuid
+from .identity import parse_canonical_uuid
 from .ir import CompiledPolicy, CompiledRule, ConditionAtom
 from .parser import parse_cacl
 from .permissions import (
@@ -48,9 +48,6 @@ _RFC3339_RE = re.compile(
 class CompilerConfig:
     """Configuration knobs for standalone compilation."""
 
-    resolver: PrincipalResolver | None = None
-    # When True and resolver is present, unknown principals are errors; False emits warnings.
-    strict_principal_existence: bool = True
     # Optional target object type context (DIRECTORY or DOCUMENT) for deeper scope diagnostics.
     target_object_type: ObjectType | None = None
     # Reference UTC clock for expired-rule warnings (defaults to current UTC time).
@@ -59,6 +56,15 @@ class CompilerConfig:
     macros: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_PRESET_MACROS))
     # Guard against exponential DNF blowup.
     max_dnf_clauses: int = 256
+
+
+@dataclass(frozen=True, slots=True)
+class PrincipalRef:
+    """A principal or capability predicate occurrence in a parsed PolicyAST."""
+
+    kind: PredicateKind
+    value: str  # Canonical lowercase UUID for USER; raw non-empty string for GROUP/PERM
+    span: Span
 
 
 @dataclass(slots=True)
@@ -101,12 +107,9 @@ def _parse_rfc3339_utc(raw: str) -> datetime | None:
     return dt.astimezone(UTC)
 
 
-def _collect_ast_principals(
-    ast: PolicyAST,
-) -> tuple[set, set[str], set[str]]:
-    users: set = set()
-    groups: set[str] = set()
-    perms: set[str] = set()
+def collect_principal_refs(ast: PolicyAST) -> tuple[PrincipalRef, ...]:
+    """Collect syntactically valid principal/capability references with source spans."""
+    refs: list[PrincipalRef] = []
 
     def walk(node: ExprNode) -> None:
         if isinstance(node, PredicateExprNode):
@@ -115,11 +118,9 @@ def _collect_ast_principals(
             if node.kind is PredicateKind.USER:
                 parsed = parse_canonical_uuid(node.raw_value)
                 if parsed is not None:
-                    users.add(parsed)
-            elif node.kind is PredicateKind.GROUP:
-                groups.add(node.raw_value)
-            elif node.kind is PredicateKind.PERM:
-                perms.add(node.raw_value)
+                    refs.append(PrincipalRef(node.kind, str(parsed), node.span))
+            else:
+                refs.append(PrincipalRef(node.kind, node.raw_value, node.span))
         elif isinstance(node, NotExprNode):
             walk(node.operand)
         elif isinstance(node, BinaryExprNode):
@@ -128,32 +129,13 @@ def _collect_ast_principals(
 
     for rule in ast.rules:
         walk(rule.match.expr)
-    return users, groups, perms
+    return tuple(refs)
 
 
 def compile_ast(ast: PolicyAST, config: CompilerConfig | None = None) -> CompileResult:
     cfg = config or CompilerConfig()
     diags: list[Diagnostic] = []
     now_utc = (cfg.now_utc or datetime.now(UTC)).astimezone(UTC)
-
-    # Pre-fetch principal existence in one batch if the resolver supports it.
-    batched_users: set | None = None
-    batched_groups: set[str] | None = None
-    batched_groups_checked = False
-    batched_perms: set[str] | None = None
-    batched_perms_checked = False
-    if isinstance(cfg.resolver, BatchPrincipalResolver):
-        ref_users, ref_groups, ref_perms = _collect_ast_principals(ast)
-        if ref_users:
-            batched_users = cfg.resolver.existing_users(ref_users)
-        else:
-            batched_users = set()
-        if ref_groups:
-            batched_groups = cfg.resolver.existing_groups(ref_groups)
-            batched_groups_checked = True
-        if ref_perms:
-            batched_perms = cfg.resolver.existing_perms(ref_perms)
-            batched_perms_checked = True
 
     # 1. Directive uniqueness check
     inherit_enabled = True
@@ -219,68 +201,7 @@ def compile_ast(ast: PolicyAST, config: CompilerConfig | None = None) -> Compile
                 )
                 return BoolAtom(ConditionAtom(kind, raw))
 
-            canonical_id = str(parsed_uuid)
-            if cfg.resolver is not None:
-                user_found = (
-                    parsed_uuid in batched_users
-                    if batched_users is not None
-                    else cfg.resolver.user_exists(parsed_uuid)
-                )
-                if not user_found:
-                    sev = (
-                        Severity.ERROR
-                        if cfg.strict_principal_existence
-                        else Severity.WARNING
-                    )
-                    diags.append(
-                        Diagnostic(
-                            code="E301" if sev is Severity.ERROR else "W301",
-                            severity=sev,
-                            message=f"User UUID '{canonical_id}' does not exist in principal directory.",
-                            span=node.span,
-                        )
-                    )
-            return BoolAtom(ConditionAtom(kind, canonical_id))
-
-        # --- GROUP & PERM existence checks (if resolver supports them) ---
-        if kind is PredicateKind.GROUP and cfg.resolver is not None:
-            if batched_groups_checked:
-                exists = None if batched_groups is None else (raw in batched_groups)
-            else:
-                exists = cfg.resolver.group_exists(raw)
-            if exists is False:
-                sev = (
-                    Severity.ERROR
-                    if cfg.strict_principal_existence
-                    else Severity.WARNING
-                )
-                diags.append(
-                    Diagnostic(
-                        code="E303" if sev is Severity.ERROR else "W304",
-                        severity=sev,
-                        message=f"Group '{raw}' does not exist in principal directory.",
-                        span=node.span,
-                    )
-                )
-        elif kind is PredicateKind.PERM and cfg.resolver is not None:
-            if batched_perms_checked:
-                exists = None if batched_perms is None else (raw in batched_perms)
-            else:
-                exists = cfg.resolver.perm_exists(raw)
-            if exists is False:
-                sev = (
-                    Severity.ERROR
-                    if cfg.strict_principal_existence
-                    else Severity.WARNING
-                )
-                diags.append(
-                    Diagnostic(
-                        code="E304" if sev is Severity.ERROR else "W305",
-                        severity=sev,
-                        message=f"System capability '{raw}' is not registered.",
-                        span=node.span,
-                    )
-                )
+            return BoolAtom(ConditionAtom(kind, str(parsed_uuid)))
 
         return BoolAtom(ConditionAtom(kind, raw))
 

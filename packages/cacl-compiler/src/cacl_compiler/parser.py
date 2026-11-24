@@ -280,9 +280,7 @@ class _ASTBuilder(Transformer):
             elif isinstance(part, tuple) and part[0] == "remark":
                 _, remark, remark_span = part
             else:  # bool_expr following `when`
-                match_clause = MatchClauseNode(
-                    syntax="when", expr=part, span=part.span
-                )
+                match_clause = MatchClauseNode(syntax="when", expr=part, span=part.span)
 
         assert match_clause is not None
         return RuleNode(
@@ -298,6 +296,7 @@ class _ASTBuilder(Transformer):
             remark_span=remark_span,
             span=_meta_span(meta),
         )
+
 
 _LARK_PARSER = Lark.open(
     "cacl.lark",

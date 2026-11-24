@@ -1,7 +1,7 @@
 [project]
 name = "cacl-compiler"
 version = "0.1.0"
-description = "Standalone compiler, analyzer, decompiler, and evaluator for CFMS Access Control Language (CEP 2)."
+description = "Standalone compiler, analyzer, and decompiler for CFMS Access Control Language (CEP 2)."
 readme = "README.md"
 authors = [
     { name = "Creeper19472", email = "creeper19472@crpteam.club" }

@@ -7,11 +7,6 @@ class ObjectType(str, Enum):
     DOCUMENT = "document"
 
 
-class ObjectState(str, Enum):
-    NORMAL = "normal"
-    SOFT_DELETED = "soft_deleted"
-
-
 class TargetApplicability(str, Enum):
     DIRECTORY = "directory"
     DOCUMENT = "document"
@@ -307,17 +302,3 @@ def mask_to_folded_tokens(
             remaining &= ~macro_mask
     tokens.extend(mask_to_atomic_names(remaining))
     return tokens
-
-
-def op_applies_to_object(op: AtomicOp, obj_type: ObjectType) -> bool:
-    meta = ATOMIC_OP_BY_FLAG[op]
-    if meta.target is TargetApplicability.BOTH:
-        return True
-    return meta.target.value == obj_type.value
-
-
-def op_applies_to_state(op: AtomicOp, state: ObjectState) -> bool:
-    meta = ATOMIC_OP_BY_FLAG[op]
-    if meta.state is StateApplicability.BOTH:
-        return True
-    return meta.state.value == state.value

@@ -1,11 +1,10 @@
-"""Conformance tests for CEP 2 (CACL). Run: uv run --with pytest pytest"""
+"""Conformance tests for CEP 2 (CACL) compiler, analyzer, IR, and decompiler."""
 
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
 import pytest
-
 from cacl_compiler import (
     DEFAULT_PRESET_MACROS,
     AtomicOp,
@@ -13,29 +12,19 @@ from cacl_compiler import (
     CompiledRule,
     CompilerConfig,
     DecompileOptions,
-    InMemoryPrincipalResolver,
-    NamespaceNode,
-    ObjectState,
     ObjectType,
-    Subject,
-    UserDirectoryEntry,
-    UserRenderMode,
-    authorize_policy_save,
+    PredicateKind,
+    collect_principal_refs,
     compile_cacl,
-    datetime_to_epoch_us,
     decompile_policy,
-    epoch_us_to_datetime,
-    evaluate_access,
-    evaluate_effective_masks,
-    evaluate_reparent,
-    evaluate_soft_delete,
+    parse_cacl,
 )
-from cacl_compiler.ast_nodes import Scope
+from cacl_compiler.ast_nodes import Effect, Scope
 from cacl_compiler.cli import main as cli_main
 
 GRAMMAR = Path(__file__).parents[1] / "src" / "cacl_compiler" / "cacl.lark"
 
-EXAMPLE_A = '''
+EXAMPLE_A = """
 inherit on;
 # Prohibit reading or destroying historical revisions without audit clearance
 deny [READ_REVISION, DELETE_REVISION] on docs
@@ -47,9 +36,9 @@ allow [PRESET_RW, -RENAME, -DELETE]
   remark "External collaborators restricted to content iteration";
 allow [PRESET_TRASH_RW] on dirs
   when (group("core_dev") and perm("vault_write")) or group("sec_auditors");
-'''
+"""
 
-EXAMPLE_B = '''
+EXAMPLE_B = """
 inherit off;
 allow [TRAVERSE, CREATE_DOCUMENT] on self
   to group("all_employees")
@@ -59,9 +48,9 @@ allow [LIST_DIRECTORY] on self
 allow [READ_CONTENT, READ_METADATA] on docs
   to group("review_board")
   remark "Read-only inspection by the review board";
-'''
+"""
 
-EXAMPLE_C = '''
+EXAMPLE_C = """
 inherit on;
 allow [PRESET_READ, LIST_REVISIONS] on docs
   to user("5548914a-1297-48f2-8c35-274d222f4338") # auditor_li
@@ -75,7 +64,7 @@ deny [WRITE_CONTENT, DELETE, PURGE] on all
   when not group("sec_incident_commander")
   until "2026-11-25T12:00:00Z"
   remark "Temporary freeze during incident No.402";
-'''
+"""
 
 NOW = datetime(2026, 11, 24, tzinfo=UTC)
 
@@ -83,13 +72,6 @@ NOW = datetime(2026, 11, 24, tzinfo=UTC)
 U_ALICE = UUID("11111111-1111-4111-8111-111111111111")
 U_BOB = UUID("5a52345a-ae51-4516-b277-bbd94b99d73a")
 U_LI = UUID("5548914a-1297-48f2-8c35-274d222f4338")
-DIRECTORY = InMemoryPrincipalResolver(
-    users=[
-        UserDirectoryEntry(U_ALICE, "alice"),
-        UserDirectoryEntry(U_BOB, "external_bob"),
-        UserDirectoryEntry(U_LI, "auditor_li"),
-    ]
-)
 
 
 def compile_(src, **kw):
@@ -123,11 +105,17 @@ def test_macros_exactly_as_specified():
         | AtomicOp.DIRECTORY_DELETE_CHILD
     )
     assert m["PRESET_ACL_RW"] == int(AtomicOp.READ_DACL | AtomicOp.WRITE_DACL)
-    for excluded in ("READ_REVISION", "DELETE_REVISION", "PURGE", "READ_DACL", "WRITE_DACL"):
+    for excluded in (
+        "READ_REVISION",
+        "DELETE_REVISION",
+        "PURGE",
+        "READ_DACL",
+        "WRITE_DACL",
+    ):
         assert not m["PRESET_WRITE"] & AtomicOp[excluded]
-    assert not compile_('allow [PRESET_EDIT] to any;').ok
-    assert "E202" in codes(compile_('allow [PRESET_TRASH_MANAGE] to any;'))
-    assert "E202" in codes(compile_('allow [PRESET_ACL_MANAGE] to any;'))
+    assert not compile_("allow [PRESET_EDIT] to any;").ok
+    assert "E202" in codes(compile_("allow [PRESET_TRASH_MANAGE] to any;"))
+    assert "E202" in codes(compile_("allow [PRESET_ACL_MANAGE] to any;"))
 
 
 # --- Section 4: grammar -----------------------------------------------------
@@ -135,14 +123,17 @@ def test_macros_exactly_as_specified():
 
 def test_grammar_matches_spec_text():
     text = GRAMMAR.read_text(encoding="utf-8")
-    assert 'rule: effect op_set scope_clause? match_clause time_clause? remark_clause? ";"' in text
+    assert (
+        'rule: effect op_set scope_clause? match_clause time_clause? remark_clause? ";"'
+        in text
+    )
     assert "start: directive* rule*" in text
     assert 'PRINCIPAL_KIND: "user" | "group"' in text
 
 
 @pytest.mark.parametrize("src", [EXAMPLE_A, EXAMPLE_B, EXAMPLE_C])
 def test_spec_examples_compile_statelessly(src):
-    # All normative CEP 2 examples compile completely statelessly with no resolver.
+    # All normative CEP 2 examples compile completely statelessly.
     res = compile_(src)
     assert res.ok, res.diagnostics
     assert not res.errors
@@ -164,13 +155,15 @@ def test_perm_not_allowed_in_to():
 
 
 def test_default_scope_all_and_inherit_on():
-    p = compile_('allow [TRAVERSE] to any;').policy
+    p = compile_("allow [TRAVERSE] to any;").policy
     assert p.inherit is True and p.rules[0].scope is Scope.ALL
 
 
 def test_precedence_not_and_or():
     # not > and > or  ==>  a or (b and (not c))
-    r = compile_('allow [TRAVERSE] when group("a") or group("b") and not group("c");').policy.rules[0]
+    r = compile_(
+        'allow [TRAVERSE] when group("a") or group("b") and not group("c");'
+    ).policy.rules[0]
     sets = {frozenset((a.value, a.negated) for a in c.atoms) for c in r.dnf_clauses}
     assert sets == {frozenset({("a", False)}), frozenset({("b", False), ("c", True)})}
 
@@ -227,7 +220,9 @@ def test_scope_intersection_warnings():
     assert not codes(compile_("allow [PRESET_READ] on docs to any;")) & {"W203", "W204"}
     assert not codes(compile_("allow [PRESET_READ] on dirs to any;")) & {"W203", "W204"}
     # known Document target + `on dirs`
-    res = compile_("allow [PRESET_READ] on dirs to any;", target_object_type=ObjectType.DOCUMENT)
+    res = compile_(
+        "allow [PRESET_READ] on dirs to any;", target_object_type=ObjectType.DOCUMENT
+    )
     assert "W205" in codes(res)
 
 
@@ -261,9 +256,6 @@ def test_predicate_literals():
 def test_user_identifier_must_be_strict_rfc9562_uuid(bad_id):
     res = compile_(f'allow [TRAVERSE] to user("{bad_id}");')
     assert not res.ok and "E302" in codes(res)
-    # Mutable usernames remain prohibited even when a directory resolver is attached
-    res_with_dir = compile_(f'allow [TRAVERSE] to user("{bad_id}");', resolver=DIRECTORY)
-    assert not res_with_dir.ok and "E302" in codes(res_with_dir)
 
 
 @pytest.mark.parametrize(
@@ -282,33 +274,47 @@ def test_user_uuid_version_agnostic_and_canonicalised(valid_uuid):
 
 
 def test_duplicate_user_uuid_case_variant_warns():
-    res = compile_(f'allow [TRAVERSE] to user("{str(U_ALICE).upper()}"), user("{U_ALICE}");')
+    res = compile_(
+        f'allow [TRAVERSE] to user("{str(U_ALICE).upper()}"), user("{U_ALICE}");'
+    )
     assert res.ok and "W208" in codes(res)
 
 
-def test_optional_directory_existence_check_for_uuid():
-    unknown = "99999999-9999-4999-8999-999999999999"
-    assert compile_(f'allow [TRAVERSE] to user("{U_ALICE}");', resolver=DIRECTORY).ok
-    res_err = compile_(f'allow [TRAVERSE] to user("{unknown}");', resolver=DIRECTORY)
-    assert not res_err.ok and "E301" in codes(res_err)
-    res_warn = compile_(
-        f'allow [TRAVERSE] to user("{unknown}");',
-        resolver=DIRECTORY,
-        strict_principal_existence=False,
+def test_collect_principal_refs_preserves_spans_and_normalizes_uuids():
+    src = (
+        f'allow [TRAVERSE] when user("{str(U_ALICE).upper()}") '
+        'or (group("eng") and not perm("audit")) '
+        'or user("not-a-uuid");'
     )
-    assert res_warn.ok and "W301" in codes(res_warn)
+    ast, diags = parse_cacl(src)
+    assert ast is not None and not diags
+    refs = collect_principal_refs(ast)
+    assert [(r.kind, r.value) for r in refs] == [
+        (PredicateKind.USER, str(U_ALICE)),
+        (PredicateKind.GROUP, "eng"),
+        (PredicateKind.PERM, "audit"),
+    ]
+    assert all(r.span.line == 1 for r in refs)
 
 
 @pytest.mark.parametrize(
     "ts",
-    ["2026-12-01T00:00:00", "2026-12-01", "2026-12-01 00:00:00Z", "2026-13-01T00:00:00Z", "x"],
+    [
+        "2026-12-01T00:00:00",
+        "2026-12-01",
+        "2026-12-01 00:00:00Z",
+        "2026-13-01T00:00:00Z",
+        "x",
+    ],
 )
 def test_naive_or_invalid_timestamps_rejected(ts):
     assert not compile_(f'allow [TRAVERSE] to any from "{ts}";').ok
 
 
 def test_timestamp_normalised_to_utc():
-    r = compile_('allow [TRAVERSE] to any from "2026-12-01T08:00:00+08:00";').policy.rules[0]
+    r = compile_(
+        'allow [TRAVERSE] to any from "2026-12-01T08:00:00+08:00";'
+    ).policy.rules[0]
     assert r.valid_from == datetime(2026, 12, 1, tzinfo=UTC)
 
 
@@ -364,7 +370,7 @@ def test_decompile_uuid_annotated_roundtrip():
     p = compile_(EXAMPLE_A).policy
     annotated = decompile_policy(
         p,
-        DecompileOptions(resolver=DIRECTORY, user_mode=UserRenderMode.UUID_ANNOTATED),
+        DecompileOptions(user_annotations={str(U_BOB): "external_bob"}),
     )
     assert f'user("{U_BOB}")' in annotated
     assert "# @external_bob" in annotated
@@ -381,165 +387,13 @@ def test_cli_check_and_fmt_canonical(tmp_path: Path, capsys):
     assert "PRESET_TRASH_RW" not in out  # canonical form expands macros
 
     bad_file = tmp_path / "legacy.cacl"
-    bad_file.write_text('allow [PRESET_TRASH_MANAGE] to user("alice");', encoding="utf-8")
+    bad_file.write_text(
+        'allow [PRESET_TRASH_MANAGE] to user("alice");', encoding="utf-8"
+    )
     assert cli_main(["check", str(bad_file)]) == 1
 
 
-# --- Section 6 runtime ----------------------------------------------------------
-
-
-def node(name, typ, src="", state=ObjectState.NORMAL):
-    res = compile_(src) if src else compile_("inherit on;")
-    assert res.ok, res.diagnostics
-    return NamespaceNode(name, name, typ, state, res.policy)
-
-
-D, F = ObjectType.DIRECTORY, ObjectType.DOCUMENT
-ALICE = Subject(user_id=U_ALICE, groups=frozenset({"g"}), perms=frozenset({"p"}))
-T = datetime(2026, 11, 24, tzinfo=UTC)
-
-
-def ev(path, op, subj=ALICE, t=T, **kw):
-    return evaluate_access(subj, path, op, t, **kw)
-
-
-def test_default_deny_and_deny_overrides_order_independent():
-    a = f'allow [READ_CONTENT] to user("{U_ALICE}");'
-    d = 'deny [READ_CONTENT] to group("g");'
-    for src in (a + d, d + a):
-        assert not ev([node("f", F, src)], AtomicOp.READ_CONTENT, check_ancestor_traverse=False).allowed
-    assert not ev([node("f", F)], AtomicOp.READ_CONTENT).allowed
-
-
-def test_user_match_by_uuid():
-    r = AtomicOp.READ_CONTENT
-    kw = dict(check_ancestor_traverse=False)
-    mine = node("f", F, f'allow [READ_CONTENT] to user("{str(U_ALICE).upper()}");')
-    other = node("f", F, f'allow [READ_CONTENT] to user("{U_BOB}");')
-    assert ev([mine], r, **kw).allowed
-    assert not ev([other], r, **kw).allowed
-
-
-def test_anonymous_never_matches_any():
-    f = node("f", F, "allow [READ_CONTENT] to any;")
-    assert ev([f], AtomicOp.READ_CONTENT).allowed
-    assert not evaluate_access(None, [f], AtomicOp.READ_CONTENT, T).allowed
-
-
-def test_scope_matrix_and_inherit_off():
-    root = node("root", D, "allow [TRAVERSE, READ_CONTENT] on docs to any; allow [TRAVERSE] on self to any;")
-    sub = node("sub", D, "allow [TRAVERSE] on dirs to any;")
-    doc = node("doc", F)
-    assert ev([root, sub, doc], AtomicOp.READ_CONTENT).allowed  # on docs, d>0
-    assert ev([root, sub], AtomicOp.TRAVERSE, check_ancestor_traverse=False).allowed  # on dirs/self
-    cut = node("cut", D, "inherit off;\nallow [TRAVERSE] on self to any;")
-    assert not ev([root, cut, doc], AtomicOp.READ_CONTENT).allowed  # truncated
-
-
-def test_inherit_off_retains_own_rules():
-    root = node("root", D, "allow [TRAVERSE, READ_CONTENT] to any;")
-    cut = node("cut", D, "inherit off; allow [TRAVERSE] to any;")
-    doc = node("doc", F, "allow [READ_CONTENT] to any;")
-    assert ev([root, cut, doc], AtomicOp.READ_CONTENT).allowed
-    assert not ev([root, cut, node("d2", F)], AtomicOp.READ_CONTENT).allowed
-
-
-def test_half_open_interval():
-    f = node("f", F, 'allow [READ_CONTENT] to any from "2026-12-01T00:00:00Z" until "2026-12-02T00:00:00Z";')
-    at = lambda s: datetime.fromisoformat(s)  # noqa: E731
-    r = AtomicOp.READ_CONTENT
-    kw = dict(check_ancestor_traverse=False)
-    assert not ev([f], r, t=at("2026-11-30T23:59:59+00:00"), **kw).allowed
-    assert ev([f], r, t=at("2026-12-01T00:00:00+00:00"), **kw).allowed
-    assert not ev([f], r, t=at("2026-12-02T00:00:00+00:00"), **kw).allowed
-
-
-def test_ancestor_traverse_required_and_bypassable():
-    root = node("root", D)
-    f = node("f", F, "allow [READ_CONTENT] to any;")
-    assert not ev([root, f], AtomicOp.READ_CONTENT).allowed
-    assert ev([root, f], AtomicOp.READ_CONTENT, check_ancestor_traverse=False).allowed
-    root_t = node("root", D, "allow [TRAVERSE] to any;")
-    assert ev([root_t, f], AtomicOp.READ_CONTENT).allowed
-
-
-def test_trash_lifecycle_rules():
-    allow_all = "allow [LIST_DELETED, RESTORE, PURGE, READ_CONTENT, DELETE] to any;"
-    live = node("d", D, allow_all)
-    dead = node("d", D, allow_all, ObjectState.SOFT_DELETED)
-    assert not ev([dead], AtomicOp.READ_CONTENT).allowed
-    assert not ev([dead], AtomicOp.DELETE).allowed
-    assert ev([dead], AtomicOp.RESTORE).allowed and ev([dead], AtomicOp.PURGE).allowed
-    assert ev([dead], AtomicOp.LIST_DELETED).allowed
-    assert not ev([live], AtomicOp.RESTORE).allowed and not ev([live], AtomicOp.PURGE).allowed
-    doc_dead = node("f", F, allow_all, ObjectState.SOFT_DELETED)
-    assert not ev([doc_dead], AtomicOp.LIST_DELETED).allowed  # directories only
-
-
-def test_trash_traverse_skips_soft_deleted_ancestors():
-    allow = "allow [TRAVERSE, RESTORE, PURGE] to any;"
-    root = node("root", D, allow)
-    dead_dir = node("dd", D, allow, ObjectState.SOFT_DELETED)
-    dead_doc = node("df", F, allow, ObjectState.SOFT_DELETED)
-    assert ev([root, dead_dir, dead_doc], AtomicOp.PURGE).allowed
-    # a soft-deleted dir cannot be restored under a soft-deleted parent
-    assert not ev([root, dead_dir, node("dd2", D, allow, ObjectState.SOFT_DELETED)], AtomicOp.RESTORE).allowed
-    assert ev([root, dead_dir], AtomicOp.RESTORE).allowed
-
-
-def test_reparent_and_move_rename_composite():
-    allow_src = 'allow [TRAVERSE, REPARENT] to any;'
-    src = [node("s", D, allow_src), node("x", F, allow_src)]
-    dst = [node("dst", D, "allow [TRAVERSE, CREATE_DOCUMENT] to any;")]
-    assert evaluate_reparent(ALICE, src, dst, T).allowed
-    assert not evaluate_reparent(ALICE, src, dst, T, also_rename=True).allowed  # needs RENAME
-    both = 'allow [TRAVERSE, REPARENT, RENAME] to any;'
-    src2 = [node("s", D, both), node("x", F, both)]
-    assert evaluate_reparent(ALICE, src2, dst, T, also_rename=True).allowed
-    dst_nocreate = [node("dst", D, "allow [TRAVERSE] to any;")]
-    assert not evaluate_reparent(ALICE, src2, dst_nocreate, T).allowed
-
-
-def test_soft_delete_non_empty_directory():
-    base = "allow [TRAVERSE] to any;\n"
-    target = [node("d", D, base + "allow [DELETE] to any;")]
-    child = target + [node("c", F, "deny [DELETE] to any;")]
-    assert not evaluate_soft_delete(ALICE, target, [child], T).allowed
-    with_bypass = [node("d", D, base + "allow [DELETE, DIRECTORY_DELETE_CHILD] to any;")]
-    child2 = with_bypass + [node("c", F, "deny [DELETE] to any;")]
-    assert evaluate_soft_delete(ALICE, with_bypass, [child2], T).allowed
-    # DIRECTORY_DELETE_CHILD alone never substitutes for DELETE on the target
-    only_bypass = [node("d", D, base + "allow [DIRECTORY_DELETE_CHILD] to any;")]
-    assert not evaluate_soft_delete(ALICE, only_bypass, [], T).allowed
-
-
-def test_composite_evaluators_forward_bypass_traverse():
-    root_no_traverse = node("root", D)
-    src_doc = node("x", F, "allow [REPARENT] to any;")
-    dst_dir = node("dst", D, "allow [CREATE_DOCUMENT] to any;")
-    assert not evaluate_reparent(ALICE, [root_no_traverse, src_doc], [root_no_traverse, dst_dir], T).allowed
-    assert evaluate_reparent(
-        ALICE,
-        [root_no_traverse, src_doc],
-        [root_no_traverse, dst_dir],
-        T,
-        check_ancestor_traverse=False,
-    ).allowed
-
-    dacl_doc = node("p", F, "allow [WRITE_DACL] to any;")
-    proposed = compile_("inherit off;").policy
-    assert not authorize_policy_save(ALICE, [root_no_traverse, dacl_doc], proposed, T).authorized
-    save_res = authorize_policy_save(
-        ALICE,
-        [root_no_traverse, dacl_doc],
-        proposed,
-        T,
-        check_ancestor_traverse=False,
-    )
-    assert save_res.authorized and save_res.self_lockout_warning
-
-
-# --- IR Optimizations & Runtime Helpers --------------------------------------
+# --- IR Optimizations & Serialization ----------------------------------------
 
 
 def test_dnf_minimization_tautology_resolution_and_absorption():
@@ -591,7 +445,9 @@ def test_fingerprint_is_order_independent_and_canonicalize():
     p2 = compile_(src2).policy
     assert p1.fingerprint() == p2.fingerprint()
     assert p1.canonicalize() == p2.canonicalize()
-    assert p1.fingerprint(include_remarks=False) == p2.fingerprint(include_remarks=False)
+    assert p1.fingerprint(include_remarks=False) == p2.fingerprint(
+        include_remarks=False
+    )
 
     src3 = f"""
     inherit on;
@@ -600,24 +456,19 @@ def test_fingerprint_is_order_independent_and_canonicalize():
     """
     p3 = compile_(src3).policy
     assert p1.fingerprint(include_remarks=True) != p3.fingerprint(include_remarks=True)
-    assert p1.fingerprint(include_remarks=False) == p3.fingerprint(include_remarks=False)
+    assert p1.fingerprint(include_remarks=False) == p3.fingerprint(
+        include_remarks=False
+    )
 
 
-def test_ssot_rows_roundtrip_all_timestamp_modes():
+def test_policy_dict_roundtrip():
     p = compile_(EXAMPLE_C).policy
-    for mode in ("rfc3339", "datetime", "epoch_us"):
-        rows = p.to_ssot_rows("node-1", timestamp_mode=mode)
-        restored = CompiledPolicy.from_ssot_rows(rows, node_id="node-1")
-        assert restored == p
-        assert restored.fingerprint() == p.fingerprint()
-
-    ts = datetime(2026, 12, 1, 8, 30, 15, 123456, tzinfo=UTC)
-    assert epoch_us_to_datetime(datetime_to_epoch_us(ts)) == ts
+    restored = CompiledPolicy.from_dict(p.to_dict())
+    assert restored == p
+    assert restored.fingerprint() == p.fingerprint()
 
 
 def test_compiled_rule_validates_invariants():
-    from cacl_compiler.ast_nodes import Effect
-
     with pytest.raises(ValueError, match="permission_mask"):
         CompiledRule(Effect.ALLOW, 0, Scope.ALL, (), None, None, None)
     with pytest.raises(ValueError, match="timezone-aware"):
@@ -640,72 +491,3 @@ def test_compiled_rule_validates_invariants():
             datetime(2026, 1, 1, tzinfo=UTC),
             None,
         )
-
-
-def test_next_transition_at_and_evaluate_effective_masks():
-    root = node(
-        "root",
-        D,
-        'allow [TRAVERSE, READ_CONTENT] to any until "2026-12-10T00:00:00Z";',
-    )
-    doc = node(
-        "doc",
-        F,
-        'allow [WRITE_CONTENT] to any from "2026-12-01T00:00:00Z";\n'
-        'deny [READ_CONTENT] to any until "2026-11-25T00:00:00Z";',
-    )
-    decision = evaluate_access(ALICE, [root, doc], AtomicOp.READ_CONTENT, T)
-    assert not decision.allowed
-    assert decision.next_transition_at == datetime(2026, 11, 25, tzinfo=UTC)
-
-    masks = evaluate_effective_masks(ALICE, [root, doc], T)
-    assert masks.allowed_traverse
-    assert masks.effective_allow_mask == int(AtomicOp.TRAVERSE | AtomicOp.READ_CONTENT)
-    assert masks.effective_deny_mask == int(AtomicOp.READ_CONTENT)
-    assert masks.effective_mask == int(AtomicOp.TRAVERSE)
-    assert masks.next_transition_at == datetime(2026, 11, 25, tzinfo=UTC)
-
-
-def test_batch_principal_resolver_avoids_n_plus_one():
-    class CountingBatchResolver(InMemoryPrincipalResolver):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self.single_calls = 0
-            self.batch_calls = 0
-
-        def user_exists(self, user_id):
-            self.single_calls += 1
-            return super().user_exists(user_id)
-
-        def existing_users(self, user_ids):
-            self.batch_calls += 1
-            return super().existing_users(user_ids)
-
-        def resolve_uuid_to_username(self, user_id):
-            self.single_calls += 1
-            return super().resolve_uuid_to_username(user_id)
-
-        def resolve_uuids_to_usernames(self, user_ids):
-            self.batch_calls += 1
-            return super().resolve_uuids_to_usernames(user_ids)
-
-    resolver = CountingBatchResolver(
-        users=[
-            UserDirectoryEntry(U_ALICE, "alice"),
-            UserDirectoryEntry(U_BOB, "external_bob"),
-        ],
-        groups={"g"},
-    )
-    src = f'allow [READ_CONTENT] to user("{U_ALICE}"), user("{U_BOB}"), group("g");'
-    res = compile_(src, resolver=resolver)
-    assert res.ok
-    assert resolver.single_calls == 0
-    assert resolver.batch_calls == 1
-
-    annotated = decompile_policy(
-        res.policy,
-        DecompileOptions(resolver=resolver, user_mode=UserRenderMode.UUID_ANNOTATED),
-    )
-    assert "@alice" in annotated and "@external_bob" in annotated
-    assert resolver.single_calls == 0
-    assert resolver.batch_calls == 2

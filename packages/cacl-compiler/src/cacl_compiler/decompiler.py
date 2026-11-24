@@ -1,10 +1,8 @@
+from collections.abc import Mapping
 from dataclasses import dataclass
-from enum import Enum
-from uuid import UUID
 
 from .analyzer import CompilerConfig, compile_cacl
 from .ast_nodes import PredicateKind, Scope
-from .identity import BatchPrincipalResolver, PrincipalResolver
 from .ir import (
     CompiledPolicy,
     CompiledRule,
@@ -15,17 +13,10 @@ from .ir import (
 from .permissions import mask_to_atomic_names, mask_to_folded_tokens
 
 
-class UserRenderMode(str, Enum):
-    UUID = "uuid"  # Always emit canonical UUID (CEP 2 canonical form)
-    UUID_ANNOTATED = (
-        "uuid_annotated"  # Emit UUID + transient `# @username` trailing comment
-    )
-
-
 @dataclass(slots=True)
 class DecompileOptions:
-    resolver: PrincipalResolver | None = None
-    user_mode: UserRenderMode = UserRenderMode.UUID
+    # Optional canonical lowercase user UUID -> label mapping for transient `# @label` comments.
+    user_annotations: Mapping[str, str] | None = None
     fold_presets: bool = False  # False = pure atomic ops; True = greedy macro folding
     prefer_to_syntax: bool = (
         True  # Render positive principal-only OR chains as `to ...`
@@ -37,8 +28,7 @@ class DecompileOptions:
 
 def escape_cacl_string(value: str) -> str:
     escaped = (
-        value
-        .replace("\\", "\\\\")
+        value.replace("\\", "\\\\")
         .replace('"', '\\"')
         .replace("\n", "\\n")
         .replace("\r", "\\r")
@@ -51,25 +41,11 @@ def _render_atom(
     atom: ConditionAtom,
     opts: DecompileOptions,
     annotations: list[str],
-    username_cache: dict[UUID, str] | None = None,
 ) -> str:
-    if (
-        atom.kind is PredicateKind.USER
-        and opts.user_mode is UserRenderMode.UUID_ANNOTATED
-        and opts.resolver is not None
-    ):
-        try:
-            uid = UUID(atom.value)
-        except ValueError:
-            uid = None
-        if uid is not None:
-            uname = (
-                username_cache.get(uid)
-                if username_cache is not None
-                else opts.resolver.resolve_uuid_to_username(uid)
-            )
-            if uname is not None:
-                annotations.append(f"@{uname}")
+    if atom.kind is PredicateKind.USER and opts.user_annotations is not None:
+        label = opts.user_annotations.get(atom.value)
+        if label is not None:
+            annotations.append(f"@{label}")
 
     base = f"{atom.kind.value}({escape_cacl_string(atom.value)})"
     return f"not {base}" if atom.negated else base
@@ -94,7 +70,6 @@ def _render_condition(
     rule: CompiledRule,
     opts: DecompileOptions,
     annotations: list[str],
-    username_cache: dict[UUID, str] | None = None,
 ) -> str:
     if rule.is_unsatisfiable:
         # Canonical lossless encoding of FALSE in CACL syntax
@@ -104,10 +79,7 @@ def _render_condition(
         return "to any" if opts.prefer_to_syntax else "when any"
 
     if opts.prefer_to_syntax and _can_render_as_to(rule.dnf_clauses):
-        items = [
-            _render_atom(c.atoms[0], opts, annotations, username_cache)
-            for c in rule.dnf_clauses
-        ]
+        items = [_render_atom(c.atoms[0], opts, annotations) for c in rule.dnf_clauses]
         return "to " + ", ".join(items)
 
     # Render DNF: `and` binds tighter than `or`, so no parentheses are needed around conjunctions
@@ -117,19 +89,13 @@ def _render_condition(
             clause_strs.append("any")
         else:
             clause_strs.append(
-                " and ".join(
-                    _render_atom(a, opts, annotations, username_cache)
-                    for a in clause.atoms
-                )
+                " and ".join(_render_atom(a, opts, annotations) for a in clause.atoms)
             )
     return "when " + " or ".join(clause_strs)
 
 
-def _decompile_rule_with_cache(
-    rule: CompiledRule,
-    options: DecompileOptions,
-    username_cache: dict[UUID, str] | None,
-) -> str:
+def decompile_rule(rule: CompiledRule, opts: DecompileOptions | None = None) -> str:
+    options = opts or DecompileOptions()
     op_names = (
         mask_to_folded_tokens(rule.permission_mask)
         if options.fold_presets
@@ -141,7 +107,7 @@ def _decompile_rule_with_cache(
         parts.append(f"on {rule.scope.value}")
 
     annotations: list[str] = []
-    parts.append(_render_condition(rule, options, annotations, username_cache))
+    parts.append(_render_condition(rule, options, annotations))
 
     if rule.valid_from is not None:
         parts.append(f"from {escape_cacl_string(format_utc_rfc3339(rule.valid_from))}")
@@ -158,38 +124,18 @@ def _decompile_rule_with_cache(
     return stmt
 
 
-def decompile_rule(rule: CompiledRule, opts: DecompileOptions | None = None) -> str:
-    options = opts or DecompileOptions()
-    return _decompile_rule_with_cache(rule, options, None)
-
-
 def decompile_policy(
     policy: CompiledPolicy, opts: DecompileOptions | None = None
 ) -> str:
     """Semantically lossless decompilation from CompiledPolicy back into canonical CACL text."""
     options = opts or DecompileOptions()
-    username_cache: dict[UUID, str] | None = None
-    if (
-        options.user_mode is UserRenderMode.UUID_ANNOTATED
-        and isinstance(options.resolver, BatchPrincipalResolver)
-    ):
-        uuids: set[UUID] = set()
-        for raw_uid in policy.referenced_users():
-            try:
-                uuids.add(UUID(raw_uid))
-            except ValueError:
-                pass
-        username_cache = (
-            options.resolver.resolve_uuids_to_usernames(uuids) if uuids else {}
-        )
-
     lines: list[str] = []
     if options.always_emit_inherit or not policy.inherit:
         lines.append(f"inherit {'on' if policy.inherit else 'off'};")
     if lines and policy.rules:
         lines.append("")
     for rule in policy.rules:
-        lines.append(_decompile_rule_with_cache(rule, options, username_cache))
+        lines.append(decompile_rule(rule, options))
     return "\n".join(lines) + ("\n" if lines else "")
 
 

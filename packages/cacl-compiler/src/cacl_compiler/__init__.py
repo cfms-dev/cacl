@@ -1,39 +1,25 @@
-from .analyzer import CompilerConfig, CompileResult, compile_ast, compile_cacl
+from .analyzer import (
+    CompilerConfig,
+    CompileResult,
+    PrincipalRef,
+    collect_principal_refs,
+    compile_ast,
+    compile_cacl,
+)
 from .ast_nodes import Effect, PredicateKind, Scope
 from .decompiler import (
     DecompileOptions,
-    UserRenderMode,
     decompile_policy,
     decompile_rule,
     format_cacl,
 )
 from .diagnostics import Diagnostic, Severity, Span, format_diagnostics
-from .evaluator import (
-    EffectiveMasksResult,
-    EvalDecision,
-    NamespaceNode,
-    SaveAuthzResult,
-    Subject,
-    authorize_policy_save,
-    evaluate_access,
-    evaluate_effective_masks,
-    evaluate_reparent,
-    evaluate_soft_delete,
-)
-from .identity import (
-    BatchPrincipalResolver,
-    InMemoryPrincipalResolver,
-    PrincipalResolver,
-    UserDirectoryEntry,
-    parse_canonical_uuid,
-)
+from .identity import parse_canonical_uuid
 from .ir import (
     CompiledPolicy,
     CompiledRule,
     ConditionAtom,
     DNFClause,
-    datetime_to_epoch_us,
-    epoch_us_to_datetime,
 )
 from .parser import parse_cacl
 from .permissions import (
@@ -41,7 +27,6 @@ from .permissions import (
     ATOMIC_OP_BY_NAME,
     DEFAULT_PRESET_MACROS,
     AtomicOp,
-    ObjectState,
     ObjectType,
 )
 
@@ -50,7 +35,6 @@ __all__ = [
     "ATOMIC_OP_BY_NAME",
     "DEFAULT_PRESET_MACROS",
     "AtomicOp",
-    "BatchPrincipalResolver",
     "CompileResult",
     "CompiledPolicy",
     "CompiledRule",
@@ -60,32 +44,17 @@ __all__ = [
     "DecompileOptions",
     "Diagnostic",
     "Effect",
-    "EffectiveMasksResult",
-    "EvalDecision",
-    "InMemoryPrincipalResolver",
-    "NamespaceNode",
-    "ObjectState",
     "ObjectType",
     "PredicateKind",
-    "PrincipalResolver",
-    "SaveAuthzResult",
+    "PrincipalRef",
     "Scope",
     "Severity",
     "Span",
-    "Subject",
-    "UserDirectoryEntry",
-    "UserRenderMode",
-    "authorize_policy_save",
+    "collect_principal_refs",
     "compile_ast",
     "compile_cacl",
-    "datetime_to_epoch_us",
     "decompile_policy",
     "decompile_rule",
-    "epoch_us_to_datetime",
-    "evaluate_access",
-    "evaluate_effective_masks",
-    "evaluate_reparent",
-    "evaluate_soft_delete",
     "format_cacl",
     "format_diagnostics",
     "parse_cacl",
