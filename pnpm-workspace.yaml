@@ -2,4 +2,5 @@ packages:
   - editors/*
 
 allowBuilds:
+  "@vscode/vsce-sign": true
   esbuild: true

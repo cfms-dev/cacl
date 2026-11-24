@@ -3,6 +3,13 @@
   "displayName": "CFMS Access Control Language (CACL)",
   "description": "Syntax highlighting and Language Server Protocol (LSP) support for CFMS Access Control Language (CACL / CEP 2).",
   "version": "0.1.0",
+  "publisher": "cfms-dev",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cfms-dev/cacl.git",
+    "directory": "editors/vscode-cacl"
+  },
   "engines": {
     "vscode": "^1.146.0"
   },
@@ -16,7 +23,8 @@
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit",
     "test": "node --test test/serverLauncher.test.mjs",
-    "vscode:prepublish": "pnpm run build"
+    "vscode:prepublish": "tsc --noEmit && node esbuild.mjs --production",
+    "package": "vsce package --no-dependencies"
   },
   "contributes": {
     "languages": [
@@ -118,8 +126,9 @@
     "vscode-languageclient": "^11.0.1"
   },
   "devDependencies": {
-    "@types/node": "^24.0.0",
+    "@types/node": "^24.19.2",
     "@types/vscode": "^1.146.0",
+    "@vscode/vsce": "^4.1.1",
     "esbuild": "^0.28.2",
     "typescript": "^7.0.2"
   }
