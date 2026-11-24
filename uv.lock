@@ -2,10 +2,15 @@ version = 1
 revision = 5
 requires-python = ">=3.15"
 
+[manifest]
+members = [
+    "cacl-compiler",
+]
+
 [[package]]
 name = "cacl-compiler"
 version = "0.1.0"
-source = { editable = "." }
+source = { editable = "packages/cacl-compiler" }
 dependencies = [
     { name = "lark" },
 ]
