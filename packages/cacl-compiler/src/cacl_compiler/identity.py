@@ -36,6 +36,27 @@ class PrincipalResolver(Protocol):
         ...
 
 
+@runtime_checkable
+class BatchPrincipalResolver(PrincipalResolver, Protocol):
+    """Optional batch lookup extension preventing N+1 directory queries."""
+
+    def existing_users(self, user_ids: set[UUID]) -> set[UUID]:
+        """Return the subset of ``user_ids`` that exist in the directory."""
+        ...
+
+    def existing_groups(self, group_ids: set[str]) -> set[str] | None:
+        """Return the subset of existing ``group_ids``, or None if group validation is disabled."""
+        ...
+
+    def existing_perms(self, perm_names: set[str]) -> set[str] | None:
+        """Return the subset of registered ``perm_names``, or None if capability validation is disabled."""
+        ...
+
+    def resolve_uuids_to_usernames(self, user_ids: set[UUID]) -> dict[UUID, str]:
+        """Batch-resolve user UUIDs to usernames for `#` comment annotations."""
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class UserDirectoryEntry:
     id: UUID
@@ -95,3 +116,19 @@ class InMemoryPrincipalResolver:
         if self._perms is None:
             return None
         return perm_name in self._perms
+
+    def existing_users(self, user_ids: set[UUID]) -> set[UUID]:
+        return {uid for uid in user_ids if uid in self._by_uuid}
+
+    def existing_groups(self, group_ids: set[str]) -> set[str] | None:
+        if self._groups is None:
+            return None
+        return group_ids & self._groups
+
+    def existing_perms(self, perm_names: set[str]) -> set[str] | None:
+        if self._perms is None:
+            return None
+        return perm_names & self._perms
+
+    def resolve_uuids_to_usernames(self, user_ids: set[UUID]) -> dict[UUID, str]:
+        return {uid: self._by_uuid[uid] for uid in user_ids if uid in self._by_uuid}

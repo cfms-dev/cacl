@@ -58,6 +58,26 @@ class EvalDecision:
     matched_allows: tuple[MatchedRuleTrace, ...] = ()
     effective_allow_mask: int = 0
     effective_deny_mask: int = 0
+    next_transition_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class EffectiveMasksResult:
+    allowed_traverse: bool
+    effective_allow_mask: int
+    effective_deny_mask: int
+    effective_mask: int
+    next_transition_at: datetime | None = None
+    denied_step: str | None = None
+    denied_reason: str | None = None
+
+
+def _min_transition(a: datetime | None, b: datetime | None) -> datetime | None:
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return a if a < b else b
 
 
 # Mandatory redline callback: return denial reason string to block immediately, or None to pass.
@@ -104,9 +124,16 @@ def eval_dnf(clauses: tuple[DNFClause, ...], subject: Subject) -> bool:
 def _evaluate_dacl_on_chain(
     subject: Subject,
     chain_root_to_target: list[NamespaceNode],
-    op: AtomicOp,
+    op: AtomicOp | None,
     eval_time_utc: datetime,
-) -> tuple[bool, list[MatchedRuleTrace], list[MatchedRuleTrace], int, int]:
+) -> tuple[
+    bool,
+    list[MatchedRuleTrace],
+    list[MatchedRuleTrace],
+    int,
+    int,
+    datetime | None,
+]:
     """Steps 3 & 4: Assemble inherited DACLs (respecting `inherit off`) and apply deny-overrides."""
     target = chain_root_to_target[-1]
     effective_nodes: list[tuple[int, NamespaceNode]] = []
@@ -120,19 +147,27 @@ def _evaluate_dacl_on_chain(
     matched_allows: list[MatchedRuleTrace] = []
     allow_mask = 0
     deny_mask = 0
+    next_transition: datetime | None = None
+    op_bit = int(op) if op is not None else 0
 
     for dist, node in effective_nodes:
+        if not node.policy.rules:
+            continue
         for idx, rule in enumerate(node.policy.rules):
             if not scope_matches(rule.scope, dist, target.object_type):
                 continue
-            if not rule_active_at(rule, eval_time_utc):
-                continue
+            # Track nearest validity transition for scope-matching rules whose condition matches.
             if not eval_dnf(rule.dnf_clauses, subject):
+                continue
+            next_transition = _min_transition(
+                next_transition, rule.next_transition_after(eval_time_utc)
+            )
+            if not rule_active_at(rule, eval_time_utc):
                 continue
 
             if rule.effect is Effect.DENY:
                 deny_mask |= rule.permission_mask
-                if rule.permission_mask & int(op):
+                if op_bit and (rule.permission_mask & op_bit):
                     matched_denies.append(
                         MatchedRuleTrace(
                             node.node_id,
@@ -146,7 +181,7 @@ def _evaluate_dacl_on_chain(
                     )
             else:
                 allow_mask |= rule.permission_mask
-                if rule.permission_mask & int(op):
+                if op_bit and (rule.permission_mask & op_bit):
                     matched_allows.append(
                         MatchedRuleTrace(
                             node.node_id,
@@ -160,10 +195,80 @@ def _evaluate_dacl_on_chain(
                     )
 
     if matched_denies:
-        return False, matched_denies, matched_allows, allow_mask, deny_mask
+        return False, matched_denies, matched_allows, allow_mask, deny_mask, next_transition
     if matched_allows:
-        return True, matched_denies, matched_allows, allow_mask, deny_mask
-    return False, matched_denies, matched_allows, allow_mask, deny_mask
+        return True, matched_denies, matched_allows, allow_mask, deny_mask, next_transition
+    return False, matched_denies, matched_allows, allow_mask, deny_mask, next_transition
+
+
+def evaluate_effective_masks(
+    subject: Subject | None,
+    path_root_to_target: list[NamespaceNode],
+    eval_time_utc: datetime | None = None,
+    check_ancestor_traverse: bool = True,
+) -> EffectiveMasksResult:
+    """Compute effective 21-bit allow/deny masks and cache TTL bound in one pass."""
+    if not path_root_to_target:
+        raise ValueError("path_root_to_target must contain at least the target node.")
+    if subject is None:
+        return EffectiveMasksResult(
+            allowed_traverse=False,
+            effective_allow_mask=0,
+            effective_deny_mask=0,
+            effective_mask=0,
+            denied_step="0_unauthenticated",
+            denied_reason="Unauthenticated request: not a DACL principal.",
+        )
+
+    now = (eval_time_utc or datetime.now(UTC)).astimezone(UTC)
+    target = path_root_to_target[-1]
+    next_transition: datetime | None = None
+
+    if check_ancestor_traverse and len(path_root_to_target) > 1:
+        for idx in range(len(path_root_to_target) - 1):
+            ancestor = path_root_to_target[idx]
+            if ancestor.state is not ObjectState.NORMAL:
+                if target.state is ObjectState.SOFT_DELETED:
+                    continue
+                return EffectiveMasksResult(
+                    allowed_traverse=False,
+                    effective_allow_mask=0,
+                    effective_deny_mask=0,
+                    effective_mask=0,
+                    next_transition_at=next_transition,
+                    denied_step="2_path_traverse",
+                    denied_reason=(
+                        f"Ancestor '{ancestor.name}' ({ancestor.node_id}) is not in normal state."
+                    ),
+                )
+            ok, _, _, _, _, anc_next = _evaluate_dacl_on_chain(
+                subject, path_root_to_target[: idx + 1], AtomicOp.TRAVERSE, now
+            )
+            next_transition = _min_transition(next_transition, anc_next)
+            if not ok:
+                return EffectiveMasksResult(
+                    allowed_traverse=False,
+                    effective_allow_mask=0,
+                    effective_deny_mask=0,
+                    effective_mask=0,
+                    next_transition_at=next_transition,
+                    denied_step="2_path_traverse",
+                    denied_reason=(
+                        f"Missing TRAVERSE permission on ancestor '{ancestor.name}' ({ancestor.node_id})."
+                    ),
+                )
+
+    _, _, _, a_mask, d_mask, target_next = _evaluate_dacl_on_chain(
+        subject, path_root_to_target, None, now
+    )
+    next_transition = _min_transition(next_transition, target_next)
+    return EffectiveMasksResult(
+        allowed_traverse=True,
+        effective_allow_mask=a_mask,
+        effective_deny_mask=d_mask,
+        effective_mask=a_mask & ~d_mask,
+        next_transition_at=next_transition,
+    )
 
 
 def evaluate_access(
@@ -218,6 +323,7 @@ def evaluate_access(
         )
 
     # Step 2: Ancestor directory TRAVERSE checks
+    next_transition: datetime | None = None
     if check_ancestor_traverse and len(path_root_to_target) > 1:
         for idx in range(len(path_root_to_target) - 1):
             ancestor = path_root_to_target[idx]
@@ -230,10 +336,12 @@ def evaluate_access(
                     allowed=False,
                     reason=f"Ancestor '{ancestor.name}' ({ancestor.node_id}) is not in normal state.",
                     step="2_path_traverse",
+                    next_transition_at=next_transition,
                 )
-            ok, denies, allows, a_mask, d_mask = _evaluate_dacl_on_chain(
+            ok, denies, allows, a_mask, d_mask, anc_next = _evaluate_dacl_on_chain(
                 subject, path_root_to_target[: idx + 1], AtomicOp.TRAVERSE, now
             )
+            next_transition = _min_transition(next_transition, anc_next)
             if not ok:
                 return EvalDecision(
                     allowed=False,
@@ -243,6 +351,7 @@ def evaluate_access(
                     matched_allows=tuple(allows),
                     effective_allow_mask=a_mask,
                     effective_deny_mask=d_mask,
+                    next_transition_at=next_transition,
                 )
 
     # Extension (not in CEP 2): optional deployment-specific mandatory redlines.
@@ -253,12 +362,14 @@ def evaluate_access(
                 allowed=False,
                 reason=f"Blocked by mandatory redline: {block_reason}",
                 step="ext_mandatory_redline",
+                next_transition_at=next_transition,
             )
 
     # Steps 3 & 4: DACL assembly + temporal filtering, Deny-Overrides + Default-Deny
-    _allowed, denies, allows, a_mask, d_mask = _evaluate_dacl_on_chain(
+    _allowed, denies, allows, a_mask, d_mask, target_next = _evaluate_dacl_on_chain(
         subject, path_root_to_target, operation, now
     )
+    next_transition = _min_transition(next_transition, target_next)
     if denies:
         return EvalDecision(
             allowed=False,
@@ -268,6 +379,7 @@ def evaluate_access(
             matched_allows=tuple(allows),
             effective_allow_mask=a_mask,
             effective_deny_mask=d_mask,
+            next_transition_at=next_transition,
         )
     if allows:
         return EvalDecision(
@@ -277,6 +389,7 @@ def evaluate_access(
             matched_allows=tuple(allows),
             effective_allow_mask=a_mask,
             effective_deny_mask=d_mask,
+            next_transition_at=next_transition,
         )
     return EvalDecision(
         allowed=False,
@@ -284,6 +397,7 @@ def evaluate_access(
         step="4_default_deny",
         effective_allow_mask=a_mask,
         effective_deny_mask=d_mask,
+        next_transition_at=next_transition,
     )
 
 

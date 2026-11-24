@@ -9,6 +9,8 @@ import pytest
 from cacl_compiler import (
     DEFAULT_PRESET_MACROS,
     AtomicOp,
+    CompiledPolicy,
+    CompiledRule,
     CompilerConfig,
     DecompileOptions,
     InMemoryPrincipalResolver,
@@ -20,8 +22,11 @@ from cacl_compiler import (
     UserRenderMode,
     authorize_policy_save,
     compile_cacl,
+    datetime_to_epoch_us,
     decompile_policy,
+    epoch_us_to_datetime,
     evaluate_access,
+    evaluate_effective_masks,
     evaluate_reparent,
     evaluate_soft_delete,
 )
@@ -532,3 +537,175 @@ def test_composite_evaluators_forward_bypass_traverse():
         check_ancestor_traverse=False,
     )
     assert save_res.authorized and save_res.self_lockout_warning
+
+
+# --- IR Optimizations & Runtime Helpers --------------------------------------
+
+
+def test_dnf_minimization_tautology_resolution_and_absorption():
+    # P or not P ==> tautology (any) with W213
+    taut = compile_('allow [READ_CONTENT] when group("a") or not group("a");')
+    assert taut.ok and "W213" in codes(taut)
+    assert taut.policy.rules[0].is_unconditional
+
+    # not (user(A) and user(B)) == not user(A) or not user(B) ==> tautology (user exclusivity)
+    user_taut = compile_(
+        f'allow [READ_CONTENT] when not (user("{U_ALICE}") and user("{U_BOB}"));'
+    )
+    assert user_taut.ok and "W213" in codes(user_taut)
+    assert user_taut.policy.rules[0].is_unconditional
+
+    # (a and p) or (a and not p) ==> a
+    resolved = compile_(
+        'allow [READ_CONTENT] when (group("a") and perm("p")) or (group("a") and not perm("p"));'
+    )
+    assert resolved.ok
+    assert len(resolved.policy.rules[0].dnf_clauses) == 1
+    assert len(resolved.policy.rules[0].dnf_clauses[0].atoms) == 1
+    assert resolved.policy.rules[0].dnf_clauses[0].atoms[0].value == "a"
+
+    # a or (not a and b) ==> a or b
+    absorbed = compile_(
+        'allow [READ_CONTENT] when group("a") or (not group("a") and group("b"));'
+    )
+    assert absorbed.ok
+    sets = {
+        frozenset((a.value, a.negated) for a in c.atoms)
+        for c in absorbed.policy.rules[0].dnf_clauses
+    }
+    assert sets == {frozenset({("a", False)}), frozenset({("b", False)})}
+
+
+def test_fingerprint_is_order_independent_and_canonicalize():
+    src1 = f"""
+    inherit on;
+    allow [READ_CONTENT] to user("{U_ALICE}");
+    deny [DELETE] to group("g") remark "no delete";
+    """
+    src2 = f"""
+    inherit on;
+    deny [DELETE] to group("g") remark "no delete";
+    allow [READ_CONTENT] to user("{U_ALICE}");
+    """
+    p1 = compile_(src1).policy
+    p2 = compile_(src2).policy
+    assert p1.fingerprint() == p2.fingerprint()
+    assert p1.canonicalize() == p2.canonicalize()
+    assert p1.fingerprint(include_remarks=False) == p2.fingerprint(include_remarks=False)
+
+    src3 = f"""
+    inherit on;
+    allow [READ_CONTENT] to user("{U_ALICE}");
+    deny [DELETE] to group("g") remark "different remark";
+    """
+    p3 = compile_(src3).policy
+    assert p1.fingerprint(include_remarks=True) != p3.fingerprint(include_remarks=True)
+    assert p1.fingerprint(include_remarks=False) == p3.fingerprint(include_remarks=False)
+
+
+def test_ssot_rows_roundtrip_all_timestamp_modes():
+    p = compile_(EXAMPLE_C).policy
+    for mode in ("rfc3339", "datetime", "epoch_us"):
+        rows = p.to_ssot_rows("node-1", timestamp_mode=mode)
+        restored = CompiledPolicy.from_ssot_rows(rows, node_id="node-1")
+        assert restored == p
+        assert restored.fingerprint() == p.fingerprint()
+
+    ts = datetime(2026, 12, 1, 8, 30, 15, 123456, tzinfo=UTC)
+    assert epoch_us_to_datetime(datetime_to_epoch_us(ts)) == ts
+
+
+def test_compiled_rule_validates_invariants():
+    from cacl_compiler.ast_nodes import Effect
+
+    with pytest.raises(ValueError, match="permission_mask"):
+        CompiledRule(Effect.ALLOW, 0, Scope.ALL, (), None, None, None)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        CompiledRule(
+            Effect.ALLOW,
+            int(AtomicOp.TRAVERSE),
+            Scope.ALL,
+            (),
+            datetime(2026, 1, 1),
+            None,
+            None,
+        )
+    with pytest.raises(ValueError, match="strictly earlier"):
+        CompiledRule(
+            Effect.ALLOW,
+            int(AtomicOp.TRAVERSE),
+            Scope.ALL,
+            (),
+            datetime(2026, 1, 2, tzinfo=UTC),
+            datetime(2026, 1, 1, tzinfo=UTC),
+            None,
+        )
+
+
+def test_next_transition_at_and_evaluate_effective_masks():
+    root = node(
+        "root",
+        D,
+        'allow [TRAVERSE, READ_CONTENT] to any until "2026-12-10T00:00:00Z";',
+    )
+    doc = node(
+        "doc",
+        F,
+        'allow [WRITE_CONTENT] to any from "2026-12-01T00:00:00Z";\n'
+        'deny [READ_CONTENT] to any until "2026-11-25T00:00:00Z";',
+    )
+    decision = evaluate_access(ALICE, [root, doc], AtomicOp.READ_CONTENT, T)
+    assert not decision.allowed
+    assert decision.next_transition_at == datetime(2026, 11, 25, tzinfo=UTC)
+
+    masks = evaluate_effective_masks(ALICE, [root, doc], T)
+    assert masks.allowed_traverse
+    assert masks.effective_allow_mask == int(AtomicOp.TRAVERSE | AtomicOp.READ_CONTENT)
+    assert masks.effective_deny_mask == int(AtomicOp.READ_CONTENT)
+    assert masks.effective_mask == int(AtomicOp.TRAVERSE)
+    assert masks.next_transition_at == datetime(2026, 11, 25, tzinfo=UTC)
+
+
+def test_batch_principal_resolver_avoids_n_plus_one():
+    class CountingBatchResolver(InMemoryPrincipalResolver):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.single_calls = 0
+            self.batch_calls = 0
+
+        def user_exists(self, user_id):
+            self.single_calls += 1
+            return super().user_exists(user_id)
+
+        def existing_users(self, user_ids):
+            self.batch_calls += 1
+            return super().existing_users(user_ids)
+
+        def resolve_uuid_to_username(self, user_id):
+            self.single_calls += 1
+            return super().resolve_uuid_to_username(user_id)
+
+        def resolve_uuids_to_usernames(self, user_ids):
+            self.batch_calls += 1
+            return super().resolve_uuids_to_usernames(user_ids)
+
+    resolver = CountingBatchResolver(
+        users=[
+            UserDirectoryEntry(U_ALICE, "alice"),
+            UserDirectoryEntry(U_BOB, "external_bob"),
+        ],
+        groups={"g"},
+    )
+    src = f'allow [READ_CONTENT] to user("{U_ALICE}"), user("{U_BOB}"), group("g");'
+    res = compile_(src, resolver=resolver)
+    assert res.ok
+    assert resolver.single_calls == 0
+    assert resolver.batch_calls == 1
+
+    annotated = decompile_policy(
+        res.policy,
+        DecompileOptions(resolver=resolver, user_mode=UserRenderMode.UUID_ANNOTATED),
+    )
+    assert "@alice" in annotated and "@external_bob" in annotated
+    assert resolver.single_calls == 0
+    assert resolver.batch_calls == 2

@@ -47,6 +47,7 @@ class DNFResult:
     clauses: tuple[DNFClause, ...]
     had_user_exclusivity_contradiction: bool = False
     was_absorbed_by_any: bool = False
+    simplified_to_tautology: bool = False
 
 
 def _to_nnf(node: BoolIR, negated: bool = False) -> BoolIR:
@@ -119,9 +120,82 @@ def _subsume_clauses(
     return kept
 
 
+def _minimize_dnf_clauses(
+    clauses: list[frozenset[ConditionAtom]],
+) -> list[frozenset[ConditionAtom]]:
+    """Apply fixed-point Boolean & domain minimization on DNF clauses.
+
+    Handles:
+      1. Subsumption: A or (A and B) ==> A
+      2. Unit-complement absorption: P or (not P and B) ==> P or B
+      3. Complementary resolution: (C and P) or (C and not P) ==> C
+      4. User-exclusivity tautology: (C and not user(A)) or (C and not user(B)) ==> C (A != B)
+    """
+    current = _subsume_clauses(clauses)
+    while current:
+        if any(len(c) == 0 for c in current):
+            return [frozenset()]
+
+        changed = False
+
+        # 1. Unit-complement absorption: {P} absorbs `not P` from any other clause.
+        unit_complements = {
+            ConditionAtom(a.kind, a.value, negated=not a.negated)
+            for c in current
+            if len(c) == 1
+            for a in c
+        }
+        if unit_complements:
+            absorbed: list[frozenset[ConditionAtom]] = []
+            for c in current:
+                if len(c) > 1 and (c & unit_complements):
+                    reduced = c - unit_complements
+                    absorbed.append(reduced)
+                    changed = True
+                else:
+                    absorbed.append(c)
+            if changed:
+                current = _subsume_clauses(absorbed)
+                continue
+
+        # 2. Complementary pair resolution: (C | {P}) or (C | {not P}) ==> C
+        clause_set = set(current)
+        resolved: list[frozenset[ConditionAtom]] = []
+        for c in current:
+            for a in c:
+                if not a.negated:
+                    partner = (c - {a}) | {ConditionAtom(a.kind, a.value, negated=True)}
+                    if partner in clause_set:
+                        resolved.append(c - {a})
+                        changed = True
+        if changed:
+            current = _subsume_clauses(current + resolved)
+            continue
+
+        # 3. Domain invariant: a Subject has a single user UUID, so
+        #    (C and not user(A)) or (C and not user(B)) (A != B) ==> C
+        neg_user_contexts: dict[frozenset[ConditionAtom], set[str]] = {}
+        for c in current:
+            for a in c:
+                if a.kind is PredicateKind.USER and a.negated:
+                    ctx = c - {a}
+                    neg_user_contexts.setdefault(ctx, set()).add(a.value)
+        user_resolved = [
+            ctx for ctx, uids in neg_user_contexts.items() if len(uids) >= 2
+        ]
+        if user_resolved:
+            current = _subsume_clauses(current + user_resolved)
+            continue
+
+        break
+
+    return current
+
+
 def lower_to_dnf(root: BoolIR, max_clauses: int = 256) -> DNFResult:
     """Lower a BoolIR expression into canonical, minimized DNF."""
     nnf = _to_nnf(root)
+    is_literal_any = isinstance(nnf, BoolConst) and nnf.value
     user_contradiction = False
     saw_non_empty_alongside_any = False
 
@@ -139,7 +213,7 @@ def lower_to_dnf(root: BoolIR, max_clauses: int = 256) -> DNFResult:
             has_non_empty = any(len(c) > 0 for c in combined)
             if has_empty and has_non_empty:
                 saw_non_empty_alongside_any = True
-            reduced = _subsume_clauses(combined)
+            reduced = _minimize_dnf_clauses(combined)
             if len(reduced) > max_clauses:
                 raise DNFComplexityError(
                     f"DNF expansion exceeded safety limit of {max_clauses} clauses."
@@ -159,12 +233,12 @@ def lower_to_dnf(root: BoolIR, max_clauses: int = 256) -> DNFResult:
                     if merged is not None:
                         product.append(merged)
                     if len(product) > max_clauses * 4:
-                        product = _subsume_clauses(product)
+                        product = _minimize_dnf_clauses(product)
                         if len(product) > max_clauses:
                             raise DNFComplexityError(
                                 f"DNF expansion exceeded safety limit of {max_clauses} clauses."
                             )
-            reduced = _subsume_clauses(product)
+            reduced = _minimize_dnf_clauses(product)
             if len(reduced) > max_clauses:
                 raise DNFComplexityError(
                     f"DNF expansion exceeded safety limit of {max_clauses} clauses."
@@ -172,7 +246,7 @@ def lower_to_dnf(root: BoolIR, max_clauses: int = 256) -> DNFResult:
             return reduced
         raise TypeError(f"Unexpected NNF node: {type(node)!r}")
 
-    raw_clauses = expand(nnf)
+    raw_clauses = _minimize_dnf_clauses(expand(nnf))
     sorted_clauses = tuple(
         DNFClause(atoms=tuple(sorted(c, key=lambda a: a.sort_key())))
         for c in sorted(
@@ -182,8 +256,15 @@ def lower_to_dnf(root: BoolIR, max_clauses: int = 256) -> DNFResult:
             ),
         )
     )
+    simplified_to_tautology = (
+        len(sorted_clauses) == 1
+        and sorted_clauses[0].is_tautology
+        and not is_literal_any
+        and not saw_non_empty_alongside_any
+    )
     return DNFResult(
         clauses=sorted_clauses,
         had_user_exclusivity_contradiction=user_contradiction,
         was_absorbed_by_any=saw_non_empty_alongside_any,
+        simplified_to_tautology=simplified_to_tautology,
     )

@@ -25,7 +25,7 @@ from .dnf import (
     DNFComplexityError,
     lower_to_dnf,
 )
-from .identity import PrincipalResolver, parse_canonical_uuid
+from .identity import BatchPrincipalResolver, PrincipalResolver, parse_canonical_uuid
 from .ir import CompiledPolicy, CompiledRule, ConditionAtom
 from .parser import parse_cacl
 from .permissions import (
@@ -101,10 +101,59 @@ def _parse_rfc3339_utc(raw: str) -> datetime | None:
     return dt.astimezone(UTC)
 
 
+def _collect_ast_principals(
+    ast: PolicyAST,
+) -> tuple[set, set[str], set[str]]:
+    users: set = set()
+    groups: set[str] = set()
+    perms: set[str] = set()
+
+    def walk(node: ExprNode) -> None:
+        if isinstance(node, PredicateExprNode):
+            if not node.raw_value:
+                return
+            if node.kind is PredicateKind.USER:
+                parsed = parse_canonical_uuid(node.raw_value)
+                if parsed is not None:
+                    users.add(parsed)
+            elif node.kind is PredicateKind.GROUP:
+                groups.add(node.raw_value)
+            elif node.kind is PredicateKind.PERM:
+                perms.add(node.raw_value)
+        elif isinstance(node, NotExprNode):
+            walk(node.operand)
+        elif isinstance(node, BinaryExprNode):
+            walk(node.left)
+            walk(node.right)
+
+    for rule in ast.rules:
+        walk(rule.match.expr)
+    return users, groups, perms
+
+
 def compile_ast(ast: PolicyAST, config: CompilerConfig | None = None) -> CompileResult:
     cfg = config or CompilerConfig()
     diags: list[Diagnostic] = []
     now_utc = (cfg.now_utc or datetime.now(UTC)).astimezone(UTC)
+
+    # Pre-fetch principal existence in one batch if the resolver supports it.
+    batched_users: set | None = None
+    batched_groups: set[str] | None = None
+    batched_groups_checked = False
+    batched_perms: set[str] | None = None
+    batched_perms_checked = False
+    if isinstance(cfg.resolver, BatchPrincipalResolver):
+        ref_users, ref_groups, ref_perms = _collect_ast_principals(ast)
+        if ref_users:
+            batched_users = cfg.resolver.existing_users(ref_users)
+        else:
+            batched_users = set()
+        if ref_groups:
+            batched_groups = cfg.resolver.existing_groups(ref_groups)
+            batched_groups_checked = True
+        if ref_perms:
+            batched_perms = cfg.resolver.existing_perms(ref_perms)
+            batched_perms_checked = True
 
     # 1. Directive uniqueness check
     inherit_enabled = True
@@ -171,25 +220,34 @@ def compile_ast(ast: PolicyAST, config: CompilerConfig | None = None) -> Compile
                 return BoolAtom(ConditionAtom(kind, raw))
 
             canonical_id = str(parsed_uuid)
-            if cfg.resolver is not None and not cfg.resolver.user_exists(parsed_uuid):
-                sev = (
-                    Severity.ERROR
-                    if cfg.strict_principal_existence
-                    else Severity.WARNING
+            if cfg.resolver is not None:
+                user_found = (
+                    parsed_uuid in batched_users
+                    if batched_users is not None
+                    else cfg.resolver.user_exists(parsed_uuid)
                 )
-                diags.append(
-                    Diagnostic(
-                        code="E301" if sev is Severity.ERROR else "W301",
-                        severity=sev,
-                        message=f"User UUID '{canonical_id}' does not exist in principal directory.",
-                        span=node.span,
+                if not user_found:
+                    sev = (
+                        Severity.ERROR
+                        if cfg.strict_principal_existence
+                        else Severity.WARNING
                     )
-                )
+                    diags.append(
+                        Diagnostic(
+                            code="E301" if sev is Severity.ERROR else "W301",
+                            severity=sev,
+                            message=f"User UUID '{canonical_id}' does not exist in principal directory.",
+                            span=node.span,
+                        )
+                    )
             return BoolAtom(ConditionAtom(kind, canonical_id))
 
         # --- GROUP & PERM existence checks (if resolver supports them) ---
         if kind is PredicateKind.GROUP and cfg.resolver is not None:
-            exists = cfg.resolver.group_exists(raw)
+            if batched_groups_checked:
+                exists = None if batched_groups is None else (raw in batched_groups)
+            else:
+                exists = cfg.resolver.group_exists(raw)
             if exists is False:
                 sev = (
                     Severity.ERROR
@@ -205,7 +263,10 @@ def compile_ast(ast: PolicyAST, config: CompilerConfig | None = None) -> Compile
                     )
                 )
         elif kind is PredicateKind.PERM and cfg.resolver is not None:
-            exists = cfg.resolver.perm_exists(raw)
+            if batched_perms_checked:
+                exists = None if batched_perms is None else (raw in batched_perms)
+            else:
+                exists = cfg.resolver.perm_exists(raw)
             if exists is False:
                 sev = (
                     Severity.ERROR
@@ -437,15 +498,26 @@ def _compile_single_rule(
                 span=rule.match.span or rule.span,
             )
         )
+    elif dnf_res.simplified_to_tautology:
+        diags.append(
+            Diagnostic(
+                code="W213",
+                severity=Severity.WARNING,
+                message="Condition is a logical tautology (always TRUE) and simplifies to 'any'.",
+                span=rule.match.span or rule.span,
+            )
+        )
 
     # D. Temporal window validation (RFC 3339 + [valid_from, valid_until))
     valid_from: datetime | None = None
     valid_until: datetime | None = None
+    invalid_time_window = False
     if rule.time_window is not None:
         tw = rule.time_window
         if tw.valid_from is not None:
             valid_from = _parse_rfc3339_utc(tw.valid_from)
             if valid_from is None:
+                invalid_time_window = True
                 diags.append(
                     Diagnostic(
                         code="E206",
@@ -458,6 +530,7 @@ def _compile_single_rule(
         if tw.valid_until is not None:
             valid_until = _parse_rfc3339_utc(tw.valid_until)
             if valid_until is None:
+                invalid_time_window = True
                 diags.append(
                     Diagnostic(
                         code="E206",
@@ -472,6 +545,7 @@ def _compile_single_rule(
             and valid_until is not None
             and valid_from >= valid_until
         ):
+            invalid_time_window = True
             diags.append(
                 Diagnostic(
                     code="E207",
@@ -504,6 +578,9 @@ def _compile_single_rule(
                     span=tw.until_span or tw.span,
                 )
             )
+
+    if mask == 0 or invalid_time_window:
+        return None
 
     return CompiledRule(
         effect=rule.effect,

@@ -9,22 +9,32 @@ from .decompiler import (
 )
 from .diagnostics import Diagnostic, Severity, Span, format_diagnostics
 from .evaluator import (
+    EffectiveMasksResult,
     EvalDecision,
     NamespaceNode,
     SaveAuthzResult,
     Subject,
     authorize_policy_save,
     evaluate_access,
+    evaluate_effective_masks,
     evaluate_reparent,
     evaluate_soft_delete,
 )
 from .identity import (
+    BatchPrincipalResolver,
     InMemoryPrincipalResolver,
     PrincipalResolver,
     UserDirectoryEntry,
     parse_canonical_uuid,
 )
-from .ir import CompiledPolicy, CompiledRule, ConditionAtom, DNFClause
+from .ir import (
+    CompiledPolicy,
+    CompiledRule,
+    ConditionAtom,
+    DNFClause,
+    datetime_to_epoch_us,
+    epoch_us_to_datetime,
+)
 from .parser import parse_cacl
 from .permissions import (
     ATOMIC_OP_BY_FLAG,
@@ -40,6 +50,7 @@ __all__ = [
     "ATOMIC_OP_BY_NAME",
     "DEFAULT_PRESET_MACROS",
     "AtomicOp",
+    "BatchPrincipalResolver",
     "CompileResult",
     "CompiledPolicy",
     "CompiledRule",
@@ -49,6 +60,7 @@ __all__ = [
     "DecompileOptions",
     "Diagnostic",
     "Effect",
+    "EffectiveMasksResult",
     "EvalDecision",
     "InMemoryPrincipalResolver",
     "NamespaceNode",
@@ -66,9 +78,12 @@ __all__ = [
     "authorize_policy_save",
     "compile_ast",
     "compile_cacl",
+    "datetime_to_epoch_us",
     "decompile_policy",
     "decompile_rule",
+    "epoch_us_to_datetime",
     "evaluate_access",
+    "evaluate_effective_masks",
     "evaluate_reparent",
     "evaluate_soft_delete",
     "format_cacl",
