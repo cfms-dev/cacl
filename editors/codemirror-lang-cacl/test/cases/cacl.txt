@@ -1,0 +1,125 @@
+# Empty policy
+
+==>
+
+Policy()
+
+# Inherit directive and simple rule
+
+inherit on;
+allow [TRAVERSE] to any;
+
+==>
+
+Policy(
+  Directive(inherit, InheritState(on)),
+  Rule(
+    Effect(allow),
+    OpSet(OpItem(OpAdd(OpIdent(AtomicOp)))),
+    MatchClause(to, PrincipalList(Principal(AnyPred(any))))
+  )
+)
+
+# Preset macros, subtraction, scope, time window, remark, and comments
+
+# leading comment
+inherit off;
+allow [PRESET_RW, -RENAME, -DELETE] on docs
+  to user("5a52345a-ae51-4516-b277-bbd94b99d73a"), # inline comment
+     group("external_editors")
+  from "2026-01-01T00:00:00Z" until "2026-12-31T23:59:59Z"
+  remark "External collaborators";
+
+==>
+
+Policy(
+  Comment,
+  Directive(inherit, InheritState(off)),
+  Rule(
+    Effect(allow),
+    OpSet(
+      OpItem(OpAdd(OpIdent(PresetMacro))),
+      OpItem(OpSub(OpIdent(AtomicOp))),
+      OpItem(OpSub(OpIdent(AtomicOp)))
+    ),
+    ScopeClause(on, Scope(docs)),
+    MatchClause(
+      to,
+      PrincipalList(
+        Principal(PrincipalPred(PrincipalKind, String)),
+        Comment,
+        Principal(PrincipalPred(PrincipalKind, String))
+      )
+    ),
+    TimeClause(
+      ValidFrom(from, String),
+      ValidUntil(until, String)
+    ),
+    RemarkClause(remark, String)
+  )
+)
+
+# Boolean when expression with precedence and parentheses
+
+deny [READ_REVISION, DELETE_REVISION] on dirs
+  when (group("core_dev") and perm("vault_write")) or not user("550e8400-e29b-41d4-a716-446655440000");
+
+==>
+
+Policy(
+  Rule(
+    Effect(deny),
+    OpSet(
+      OpItem(OpAdd(OpIdent(AtomicOp))),
+      OpItem(OpAdd(OpIdent(AtomicOp)))
+    ),
+    ScopeClause(on, Scope(dirs)),
+    MatchClause(
+      when,
+      BoolExpr(
+        OrExpr(
+          AndExpr(
+            NotExpr(
+              Atom(
+                ParenExpr(
+                  BoolExpr(
+                    OrExpr(
+                      AndExpr(
+                        NotExpr(Atom(PrincipalPred(PrincipalKind, String))),
+                        and,
+                        NotExpr(Atom(PermPred(PermKind, String)))
+                      )
+                    )
+                  )
+                )
+              )
+            )
+          ),
+          or,
+          AndExpr(
+            NotExpr(
+              NegExpr(
+                not,
+                NotExpr(Atom(PrincipalPred(PrincipalKind, String)))
+              )
+            )
+          )
+        )
+      )
+    )
+  )
+)
+
+# Unknown uppercase operation identifier
+
+allow [CUSTOM_OP] to any;
+
+==>
+
+Policy(
+  Rule(
+    Effect(allow),
+    OpSet(OpItem(OpAdd(OpIdent(UpperIdent)))),
+    MatchClause(to, PrincipalList(Principal(AnyPred(any))))
+  )
+)

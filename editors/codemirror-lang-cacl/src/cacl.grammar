@@ -1,0 +1,92 @@
+@detectDelim
+
+@top Policy { (Directive | Rule)* }
+
+Directive {
+  kw<"inherit"> InheritState ";"
+}
+
+InheritState { kw<"on"> | kw<"off"> }
+
+Rule {
+  Effect OpSet ScopeClause? MatchClause TimeClause? RemarkClause? ";"
+}
+
+Effect { kw<"allow"> | kw<"deny"> }
+
+OpSet { "[" OpItem ("," OpItem)* "]" }
+OpItem { OpSub | OpAdd }
+OpAdd { OpIdent }
+OpSub { "-" OpIdent }
+
+ScopeClause { kw<"on"> Scope }
+Scope { kw<"self"> | kw<"dirs"> | kw<"docs"> | kw<"all"> }
+
+MatchClause {
+  kw<"to"> PrincipalList |
+  kw<"when"> BoolExpr
+}
+
+PrincipalList { Principal ("," Principal)* }
+Principal { PrincipalPred | PermPred | AnyPred }
+
+BoolExpr { OrExpr }
+OrExpr { AndExpr (kw<"or"> AndExpr)* }
+AndExpr { NotExpr (kw<"and"> NotExpr)* }
+NotExpr { NegExpr | Atom }
+NegExpr { kw<"not"> NotExpr }
+
+Atom {
+  PrincipalPred |
+  PermPred |
+  AnyPred |
+  ParenExpr
+}
+
+ParenExpr { "(" BoolExpr ")" }
+
+PrincipalPred { @specialize[@name=PrincipalKind]<Word, "user" | "group"> "(" String ")" }
+PermPred { @specialize[@name=PermKind]<Word, "perm"> "(" String ")" }
+AnyPred { kw<"any"> }
+
+TimeClause {
+  ValidFrom ValidUntil? |
+  ValidUntil
+}
+ValidFrom { kw<"from"> String }
+ValidUntil { kw<"until"> String }
+
+RemarkClause { kw<"remark"> String }
+
+kw<term> { @specialize[@name={term}]<Word, term> }
+
+OpIdent {
+  @specialize[@name=PresetMacro]<UpperIdent,
+    "CREATE_CHILD" | "MOVE" |
+    "PRESET_READ" | "PRESET_WRITE" | "PRESET_RW" |
+    "PRESET_TRASH_RW" | "PRESET_ACL_RW"> |
+  @specialize[@name=AtomicOp]<UpperIdent,
+    "TRAVERSE" | "LIST_DIRECTORY" | "CREATE_DOCUMENT" | "CREATE_DIRECTORY" |
+    "READ_CONTENT" | "WRITE_CONTENT" | "LIST_REVISIONS" | "READ_REVISION" |
+    "SET_CURRENT_REVISION" | "DELETE_REVISION" |
+    "READ_METADATA" | "WRITE_METADATA" | "RENAME" | "REPARENT" |
+    "DELETE" | "DIRECTORY_DELETE_CHILD" | "LIST_DELETED" | "RESTORE" | "PURGE" |
+    "READ_DACL" | "WRITE_DACL"> |
+  UpperIdent
+}
+
+@skip { space | Comment }
+
+@tokens {
+  space { $[ \t\r\n]+ }
+  Comment { "#" ![\r\n]* }
+  String { '"' (!["\\\r\n] | "\\" ![\r\n])* '"' }
+  UpperIdent { $[A-Z] $[A-Z0-9_]* }
+  Word { $[a-z_] $[a-zA-Z0-9_]* }
+
+  "[" "]" "(" ")" "," ";" "-"
+
+  @precedence { Comment, space }
+}
+
+@external propSource caclHighlighting from "./highlight"
