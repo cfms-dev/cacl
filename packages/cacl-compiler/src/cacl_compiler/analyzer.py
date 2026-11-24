@@ -55,7 +55,7 @@ class CompilerConfig:
     target_object_type: ObjectType | None = None
     # Reference UTC clock for expired-rule warnings (defaults to current UTC time).
     now_utc: datetime | None = None
-    # Custom macro table override (defaults to CEP-0002 presets).
+    # Custom macro table override (defaults to CEP 2 presets).
     macros: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_PRESET_MACROS))
     # Guard against exponential DNF blowup.
     max_dnf_clauses: int = 256
@@ -150,7 +150,7 @@ def compile_ast(ast: PolicyAST, config: CompilerConfig | None = None) -> Compile
             )
             return BoolAtom(ConditionAtom(kind, raw))
 
-        # CEP-0002 §4 & §5.1(5): user("id") must strictly conform to 36-char RFC 9562 UUID.
+        # CEP 2 §4 & §5.1(5): user("id") must strictly conform to 36-char RFC 9562 UUID.
         if kind is PredicateKind.USER:
             parsed_uuid = parse_canonical_uuid(raw)
             if parsed_uuid is None:
@@ -522,7 +522,7 @@ def _check_scope_compatibility(
     target_type: ObjectType | None,
     diags: list[Diagnostic],
 ) -> None:
-    # CEP-0002 5.1: warn when the scope can never intersect any applicable operation.
+    # CEP 2 5.1: warn when the scope can never intersect any applicable operation.
     if mask != 0:
         if rule.scope is Scope.DIRS and not (mask & DIR_APPLICABLE_MASK):
             diags.append(

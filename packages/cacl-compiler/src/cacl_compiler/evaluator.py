@@ -16,7 +16,7 @@ from .permissions import (
 
 @dataclass(frozen=True, slots=True)
 class Subject:
-    """Authenticated security principal (CEP-0002 Section 1).
+    """Authenticated security principal (CEP 2 Section 1).
 
     ``user_id`` is the subject's unique user identifier, which is always a UUID;
     ``user("id")`` predicates are compiled to canonical lowercase UUID strings and
@@ -65,7 +65,7 @@ RedlineHook = Callable[[Subject, NamespaceNode, AtomicOp], str | None]
 
 
 def scope_matches(scope: Scope, distance: int, target_type: ObjectType) -> bool:
-    """CEP-0002 Section 4 Scope Matching Matrix."""
+    """CEP 2 Section 4 Scope Matching Matrix."""
     if scope is Scope.SELF:
         return distance == 0
     if scope is Scope.DIRS:
@@ -174,7 +174,7 @@ def evaluate_access(
     redlines: list[RedlineHook] | None = None,
     check_ancestor_traverse: bool = True,
 ) -> EvalDecision:
-    """CEP-0002 Section 6 deterministic runtime evaluation pipeline."""
+    """CEP 2 Section 6 deterministic runtime evaluation pipeline."""
     if not path_root_to_target:
         raise ValueError("path_root_to_target must contain at least the target node.")
 
@@ -245,7 +245,7 @@ def evaluate_access(
                     effective_deny_mask=d_mask,
                 )
 
-    # Extension (not in CEP-0002): optional deployment-specific mandatory redlines.
+    # Extension (not in CEP 2): optional deployment-specific mandatory redlines.
     for hook in redlines or []:
         block_reason = hook(subject, target, operation)
         if block_reason is not None:
@@ -448,7 +448,7 @@ def authorize_policy_save(
     redlines: list[RedlineHook] | None = None,
     check_ancestor_traverse: bool = True,
 ) -> SaveAuthzResult:
-    """CEP-0002 Section 5.2 Save-time authorization (WRITE_DACL + anti-lockout advisory)."""
+    """CEP 2 Section 5.2 Save-time authorization (WRITE_DACL + anti-lockout advisory)."""
     now = (eval_time_utc or datetime.now(UTC)).astimezone(UTC)
     check = evaluate_access(
         actor,

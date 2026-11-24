@@ -137,7 +137,7 @@ def test_grammar_matches_spec_text():
 
 @pytest.mark.parametrize("src", [EXAMPLE_A, EXAMPLE_B, EXAMPLE_C])
 def test_spec_examples_compile_statelessly(src):
-    # All normative CEP-0002 examples compile completely statelessly with no resolver.
+    # All normative CEP 2 examples compile completely statelessly with no resolver.
     res = compile_(src)
     assert res.ok, res.diagnostics
     assert not res.errors

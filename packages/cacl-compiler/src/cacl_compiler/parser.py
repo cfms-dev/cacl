@@ -112,7 +112,7 @@ class _ASTBuilder(Transformer):
                 rules.append(stmt)
         return PolicyAST(directives=tuple(directives), rules=tuple(rules))
 
-    # NOTE: handlers mirror the normative grammar in cacl.lark (CEP-0002).
+    # NOTE: handlers mirror the normative grammar in cacl.lark (CEP 2).
     # Anonymous keyword/punctuation tokens are filtered out by Lark, and `?rule`
     # productions with a single child are inlined, so children are positional
     # values of the *named* sub-rules only.

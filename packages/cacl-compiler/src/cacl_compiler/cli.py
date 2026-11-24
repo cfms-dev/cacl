@@ -195,7 +195,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="cacl", description="Standalone CACL (CEP-0002) compiler & toolchain"
+        prog="caclc", description="Standalone CACL (CEP 2) compiler & toolchain"
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -275,7 +275,7 @@ def main(argv: list[str] | None = None) -> int:
     p_fmt.set_defaults(func=cmd_fmt)
 
     p_eval = sub.add_parser(
-        "eval", help="Simulate CEP-0002 Section 6 runtime evaluation with trace"
+        "eval", help="Simulate CEP 2 Section 6 runtime evaluation with trace"
     )
     p_eval.add_argument("scenario", help="Path to scenario JSON file")
     p_eval.add_argument("--op", required=True, choices=sorted(ATOMIC_OP_BY_NAME.keys()))

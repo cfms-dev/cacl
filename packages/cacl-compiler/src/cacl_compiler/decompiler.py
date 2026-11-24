@@ -16,7 +16,7 @@ from .permissions import mask_to_atomic_names, mask_to_folded_tokens
 
 
 class UserRenderMode(str, Enum):
-    UUID = "uuid"  # Always emit canonical UUID (CEP-0002 canonical form)
+    UUID = "uuid"  # Always emit canonical UUID (CEP 2 canonical form)
     UUID_ANNOTATED = (
         "uuid_annotated"  # Emit UUID + transient `# @username` trailing comment
     )
@@ -30,7 +30,7 @@ class DecompileOptions:
     prefer_to_syntax: bool = (
         True  # Render positive principal-only OR chains as `to ...`
     )
-    # CEP-0002 canonical form omits the default `on all`; set False to emit it explicitly.
+    # CEP 2 canonical form omits the default `on all`; set False to emit it explicitly.
     omit_default_scope: bool = True
     always_emit_inherit: bool = True
 

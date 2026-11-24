@@ -25,7 +25,7 @@ class StateApplicability(str, Enum):
 
 
 class AtomicOp(IntFlag):
-    """21 orthogonal atomic operations defined in CEP-0002 (bits 0..20)."""
+    """21 orthogonal atomic operations defined in CEP 2 (bits 0..20)."""
 
     # 2.1 Directory-Specific Operations (0..3)
     TRAVERSE = 1 << 0  # 0x000001
