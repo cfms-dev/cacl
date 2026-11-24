@@ -1,0 +1,28 @@
+[project]
+name = "cacl-lsp"
+version = "0.1.0"
+description = "Language Server Protocol (LSP) server for CFMS Access Control Language (CACL / CEP 2)."
+readme = "README.md"
+authors = [
+    { name = "Creeper19472", email = "creeper19472@crpteam.club" }
+]
+requires-python = ">=3.15"
+dependencies = [
+    "cacl-compiler",
+    "pygls>=2.0.0",
+]
+
+[project.scripts]
+cacl-lsp = "cacl_lsp:main"
+
+[tool.uv.sources]
+cacl-compiler = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.13.5,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]

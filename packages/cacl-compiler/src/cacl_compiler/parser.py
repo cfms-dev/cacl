@@ -97,6 +97,12 @@ class _ToList:
     span: Span
 
 
+@dataclass(frozen=True, slots=True)
+class _ScopeSpec:
+    scope: Scope
+    span: Span
+
+
 class _ASTBuilder(Transformer):
     def __init__(self, diagnostics: list[Diagnostic]) -> None:
         super().__init__()
@@ -145,17 +151,21 @@ class _ASTBuilder(Transformer):
     def op_set(self, meta, children):
         return (tuple(children), _meta_span(meta))
 
-    def scope_self(self, children):
-        return Scope.SELF
+    @v_args(meta=True)
+    def scope_self(self, meta, children):
+        return _ScopeSpec(scope=Scope.SELF, span=_meta_span(meta))
 
-    def scope_dirs(self, children):
-        return Scope.DIRS
+    @v_args(meta=True)
+    def scope_dirs(self, meta, children):
+        return _ScopeSpec(scope=Scope.DIRS, span=_meta_span(meta))
 
-    def scope_docs(self, children):
-        return Scope.DOCS
+    @v_args(meta=True)
+    def scope_docs(self, meta, children):
+        return _ScopeSpec(scope=Scope.DOCS, span=_meta_span(meta))
 
-    def scope_all(self, children):
-        return Scope.ALL
+    @v_args(meta=True)
+    def scope_all(self, meta, children):
+        return _ScopeSpec(scope=Scope.ALL, span=_meta_span(meta))
 
     @v_args(meta=True)
     def principal_pred(self, meta, children):
@@ -249,14 +259,15 @@ class _ASTBuilder(Transformer):
         op_items, op_set_span = children[1]
         scope = Scope.ALL
         scope_explicit = False
+        scope_span: Span | None = None
         match_clause: MatchClauseNode | None = None
         time_window: TimeWindowNode | None = None
         remark: str | None = None
         remark_span: Span | None = None
 
         for part in children[2:]:
-            if isinstance(part, Scope):
-                scope, scope_explicit = part, True
+            if isinstance(part, _ScopeSpec):
+                scope, scope_explicit, scope_span = part.scope, True, part.span
             elif isinstance(part, _ToList):
                 match_clause = MatchClauseNode(
                     syntax="to",
@@ -280,7 +291,7 @@ class _ASTBuilder(Transformer):
             op_set_span=op_set_span,
             scope=scope,
             scope_explicit=scope_explicit,
-            scope_span=None,
+            scope_span=scope_span,
             match=match_clause,
             time_window=time_window,
             remark=remark,

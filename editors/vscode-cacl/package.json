@@ -1,25 +1,126 @@
 {
   "name": "vscode-cacl",
   "displayName": "CFMS Access Control Language (CACL)",
-  "description": "",
-  "version": "0.0.1",
+  "description": "Syntax highlighting and Language Server Protocol (LSP) support for CFMS Access Control Language (CACL / CEP 2).",
+  "version": "0.1.0",
   "engines": {
     "vscode": "^1.146.0"
   },
   "categories": [
     "Programming Languages"
   ],
+  "main": "./dist/extension.js",
+  "activationEvents": [],
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/serverLauncher.test.mjs",
+    "vscode:prepublish": "pnpm run build"
+  },
   "contributes": {
-    "languages": [{
-      "id": "cacl",
-      "aliases": ["CACL", "cacl"],
-      "extensions": [".cacl"],
-      "configuration": "./language-configuration.json"
-    }],
-    "grammars": [{
-      "language": "cacl",
-      "scopeName": "source.cacl",
-      "path": "./syntaxes/cacl.tmLanguage.json"
-    }]
+    "languages": [
+      {
+        "id": "cacl",
+        "aliases": [
+          "CACL",
+          "cacl"
+        ],
+        "extensions": [
+          ".cacl"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "cacl",
+        "scopeName": "source.cacl",
+        "path": "./syntaxes/cacl.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "cacl.restartServer",
+        "title": "CACL: Restart Language Server"
+      }
+    ],
+    "configuration": {
+      "title": "CACL",
+      "properties": {
+        "cacl.server.command": {
+          "type": "string",
+          "default": "",
+          "description": "Path or executable name of the cacl-lsp server. Leave empty to auto-detect from workspace .venv, PATH, or `uv run cacl-lsp`."
+        },
+        "cacl.server.args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Extra command-line arguments passed to cacl-lsp (e.g. [\"--log-level\", \"DEBUG\"])."
+        },
+        "cacl.server.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Traces the communication between VS Code and the CACL language server."
+        },
+        "cacl.compiler.targetObjectType": {
+          "type": "string",
+          "enum": [
+            "none",
+            "directory",
+            "document"
+          ],
+          "default": "none",
+          "description": "Optional target object type context for deeper scope-applicability diagnostics (W205)."
+        },
+        "cacl.format.preserveComments": {
+          "type": "boolean",
+          "default": true,
+          "description": "Preserve leading, inline, and trailing `#` comments when formatting CACL documents."
+        },
+        "cacl.format.foldPresets": {
+          "type": "boolean",
+          "default": false,
+          "description": "Greedily fold exact atomic operation subsets back into CEP 2 preset macros when formatting."
+        },
+        "cacl.format.preferToSyntax": {
+          "type": "boolean",
+          "default": true,
+          "description": "Render positive principal-only disjunctions using `to ...` shorthand instead of `when ...`."
+        },
+        "cacl.format.omitDefaultScope": {
+          "type": "boolean",
+          "default": true,
+          "description": "Omit the implicit default `on all` scope clause when formatting."
+        },
+        "cacl.format.alwaysEmitInherit": {
+          "type": "boolean",
+          "default": true,
+          "description": "Always emit an explicit `inherit on;` / `inherit off;` directive when formatting."
+        },
+        "cacl.inlayHints.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show inline hints for resolved macro/subtraction bitmasks, implicit `on all` scopes, and expired rules."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^11.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/vscode": "^1.146.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2"
   }
 }
