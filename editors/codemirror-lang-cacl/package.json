@@ -40,6 +40,7 @@
   "scripts": {
     "generate": "node scripts/build.mjs --generate-only",
     "build": "node scripts/build.mjs && tsc --emitDeclarationOnly",
+    "prepare": "node scripts/build.mjs && tsc --emitDeclarationOnly",
     "typecheck": "node scripts/build.mjs --generate-only && tsc --noEmit",
     "test": "pnpm run build && node --test test/*.test.mjs"
   },
